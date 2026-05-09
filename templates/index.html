@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GPT Image 360 Viewer</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css"
+    />
+    <style>
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: #0f1115;
+        color: #f5f5f5;
+      }
+
+      .container {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 80px;
+        border-radius: 8px;
+        border: 1px solid #2c3240;
+        background: #161a22;
+        color: #f5f5f5;
+        padding: 10px;
+        resize: vertical;
+      }
+
+      button {
+        border: none;
+        border-radius: 8px;
+        background: #2f7cff;
+        color: white;
+        padding: 12px 16px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      #status {
+        margin-bottom: 10px;
+        color: #a6b0c3;
+      }
+
+      #panorama {
+        width: 100%;
+        height: 70vh;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid #2c3240;
+      }
+
+      #hud {
+        margin-top: 10px;
+        display: flex;
+        gap: 16px;
+        color: #a6b0c3;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Grid Street-View 360 Explorer</h1>
+      <p>Start a fictional world, then click directional hotspots to jump between panoramas.</p>
+
+      <div class="controls">
+        <textarea id="prompt">{{ default_prompt }}</textarea>
+        <button id="startWorld">Start World</button>
+        <button id="reloadNode">Reload Node</button>
+      </div>
+      <div id="status">Ready.</div>
+      <div id="panorama"></div>
+      <div id="hud">
+        <div id="worldId">World: -</div>
+        <div id="coord">Coord: (0, 0)</div>
+        <div id="cache">Cache: -</div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+    <script>
+      const promptInput = document.getElementById("prompt");
+      const startWorldButton = document.getElementById("startWorld");
+      const reloadNodeButton = document.getElementById("reloadNode");
+      const statusText = document.getElementById("status");
+      const worldIdText = document.getElementById("worldId");
+      const coordText = document.getElementById("coord");
+      const cacheText = document.getElementById("cache");
+
+      let viewer = null;
+      let worldState = {
+        worldId: null,
+        x: 0,
+        y: 0
+      };
+
+      function moveSpot(yaw, pitch, direction, label) {
+        return {
+          pitch,
+          yaw,
+          type: "info",
+          text: label,
+          cssClass: "custom-hotspot",
+          clickHandlerFunc: () => move(direction)
+        };
+      }
+
+      function showPanorama(payload) {
+        const { imageUrl, x, y, worldId, cacheHit } = payload;
+        if (viewer) {
+          viewer.destroy();
+        }
+        viewer = pannellum.viewer("panorama", {
+          type: "equirectangular",
+          panorama: imageUrl,
+          autoLoad: true,
+          showZoomCtrl: true,
+          showFullscreenCtrl: true,
+          pitch: 0,
+          yaw: 0,
+          hfov: 100,
+          hotSpots: [
+            moveSpot(0, 0, "north", "North"),
+            moveSpot(180, 0, "south", "South"),
+            moveSpot(90, 0, "east", "East"),
+            moveSpot(-90, 0, "west", "West")
+          ]
+        });
+
+        worldState.worldId = worldId;
+        worldState.x = x;
+        worldState.y = y;
+        worldIdText.textContent = `World: ${worldId}`;
+        coordText.textContent = `Coord: (${x}, ${y})`;
+        cacheText.textContent = `Cache: ${cacheHit ? "hit" : "miss"}`;
+      }
+
+      async function startWorld() {
+        startWorldButton.disabled = true;
+        statusText.textContent = "Starting world and loading origin node...";
+        try {
+          const response = await fetch("/world/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: promptInput.value })
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || "Failed to start world.");
+          }
+
+          statusText.textContent = "World ready. Click North/South/East/West hotspots to move.";
+          showPanorama(data);
+        } catch (error) {
+          statusText.textContent = `Error: ${error.message}`;
+        } finally {
+          startWorldButton.disabled = false;
+        }
+      }
+
+      async function move(direction) {
+        if (!worldState.worldId) {
+          statusText.textContent = "Start a world first.";
+          return;
+        }
+        statusText.textContent = `Moving ${direction}...`;
+        try {
+          const response = await fetch("/world/move", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              world_id: worldState.worldId,
+              x: worldState.x,
+              y: worldState.y,
+              direction
+            })
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || "Move failed.");
+          }
+          showPanorama(data);
+          statusText.textContent = `Moved ${direction}. Drag to explore this node.`;
+        } catch (error) {
+          statusText.textContent = `Error: ${error.message}`;
+        }
+      }
+
+      async function reloadCurrentNode() {
+        if (!worldState.worldId) {
+          statusText.textContent = "Start a world first.";
+          return;
+        }
+        statusText.textContent = "Reloading current node...";
+        try {
+          const query = new URLSearchParams({
+            world_id: worldState.worldId,
+            x: String(worldState.x),
+            y: String(worldState.y)
+          });
+          const response = await fetch(`/world/node?${query.toString()}`);
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || "Reload failed.");
+          }
+          showPanorama(data);
+          statusText.textContent = "Reload complete.";
+        } catch (error) {
+          statusText.textContent = `Error: ${error.message}`;
+        }
+      }
+
+      startWorldButton.addEventListener("click", startWorld);
+      reloadNodeButton.addEventListener("click", reloadCurrentNode);
+    </script>
+  </body>
+</html>
