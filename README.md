@@ -1,10 +1,13 @@
-## Local Grid Street-View 360 Explorer
+## Grid Street-View 360 Explorer
 
-This project runs a local web app that:
+This is a single Vite React app that:
 - takes a fictional world prompt,
-- generates 360 panorama nodes with `gpt-image-2`,
+- opens a 360 panorama viewer,
 - supports Street View-style directional movement (north/south/east/west),
-- caches generated nodes on disk and reuses them.
+- generates panorama nodes with the OpenAI Image API,
+- stores world history and generated image data in browser local storage.
+
+There is no backend. The app calls OpenAI directly from the browser, using the API key from `.env`.
 
 ## Setup
 
@@ -14,18 +17,23 @@ This project runs a local web app that:
 
 2. Install dependencies:
 
-   `uv sync`
+   `yarn install`
 
 3. Start the app:
 
-   `uv run main.py`
+   `yarn dev`
 
-4. Open:
+4. Open the Vite URL printed in the terminal.
 
-   <http://127.0.0.1:8000>
+## Scripts
+
+- `yarn dev` - run the local Vite dev server.
+- `yarn build` - create a production build.
+- `yarn preview` - preview the production build.
 
 ## Notes
 
-- For best results, use prompts that explicitly request a **360 equirectangular panorama** and **2:1 aspect ratio**.
-- Cached worlds are stored in `world_cache/<world_id>/`.
-- Node images are saved as `world_cache/<world_id>/images/<x>_<y>.png`.
+- This app loads Pannellum from a CDN in `index.html`.
+- Because this is a frontend-only app, the OpenAI API key is exposed to the browser while the local dev server is running.
+- Vite is configured to expose `OPENAI_API_KEY` from `.env` for this local-only workflow.
+- The app uses `gpt-image-1.5` with `1536x1024` landscape output.
