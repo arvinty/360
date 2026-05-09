@@ -30,6 +30,8 @@ export type Goal = {
   origin: string;
   target: string;
   theme: string;
+  originShort: string;
+  targetShort: string;
   moves: number;
   won: boolean;
   wonAt?: string;
@@ -58,6 +60,8 @@ export type WorldSummary = {
   origin_image_url: string | null;
   goal_origin: string | null;
   goal_target: string | null;
+  goal_origin_short: string | null;
+  goal_target_short: string | null;
   goal_theme: string | null;
   goal_moves: number | null;
   goal_won: boolean | null;
@@ -65,6 +69,21 @@ export type WorldSummary = {
 
 export type WorldHistoryResponse = {
   worlds: WorldSummary[];
+};
+
+export type MoveTreeNode = {
+  node_id: string;
+  parent_node_id: string | null;
+  created_at: string;
+  depth: number;
+  step: number;
+  target_label: string | null;
+  is_origin: boolean;
+};
+
+export type WorldMoveTreeResponse = {
+  world_id: string;
+  nodes: MoveTreeNode[];
 };
 
 type LegacyWorldNode = {
@@ -331,36 +350,82 @@ function buildOriginPrompt(goal: Goal): string {
   ].join("\n");
 }
 
-const GOAL_FALLBACKS: Array<Pick<Goal, "origin" | "target" | "theme">> = [
+type GoalSeed = Pick<Goal, "origin" | "target" | "theme" | "originShort" | "targetShort">;
+
+const GOAL_FALLBACKS: GoalSeed[] = [
   {
     origin: "an abandoned shopping mall, dim flickering fluorescent lights, dusty escalators",
     target: "a blue grand piano",
     theme: "music, melancholy, dust",
+    originShort: "Abandoned Mall",
+    targetShort: "Blue Grand Piano",
   },
   {
     origin: "a quiet snowy alpine village at dusk, warm lit windows, fresh snowfall",
     target: "a vintage red telephone booth",
     theme: "communication, nostalgia, isolation",
+    originShort: "Snowy Alpine Village",
+    targetShort: "Red Telephone Booth",
   },
   {
     origin: "a sprawling neon-lit night market in a futuristic city",
     target: "a centuries-old jade dragon statue",
     theme: "tradition meeting future, jade green, incense",
+    originShort: "Neon Night Market",
+    targetShort: "Jade Dragon Statue",
   },
   {
     origin: "an overgrown botanical garden inside a derelict glasshouse",
     target: "an astronaut helmet on a pedestal",
     theme: "exploration, oxygen, distant stars",
+    originShort: "Overgrown Glasshouse",
+    targetShort: "Astronaut Helmet",
   },
   {
     origin: "a coastal lighthouse and its keeper's cottage on a stormy night",
     target: "a hot air balloon basket",
     theme: "flight, ropes, woven baskets, sky",
+    originShort: "Coastal Lighthouse",
+    targetShort: "Hot Air Balloon",
   },
 ];
 
-function pickFallbackGoal(): Pick<Goal, "origin" | "target" | "theme"> {
+function pickFallbackGoal(): GoalSeed {
   return GOAL_FALLBACKS[Math.floor(Math.random() * GOAL_FALLBACKS.length)];
+}
+
+function titleCaseWord(word: string): string {
+  if (!word) return word;
+  return word[0].toUpperCase() + word.slice(1).toLowerCase();
+}
+
+/**
+ * Best-effort short label from a long descriptive phrase. Used when the LLM
+ * omits the short fields or when reading a legacy cached world that predates
+ * the short-label schema.
+ */
+function deriveShortLabel(full: string, maxWords: number): string {
+  if (!full) return "";
+  const firstClause = full.split(/[,.;:\n\r]/)[0] ?? full;
+  const cleaned = firstClause
+    .replace(/^(an?|the)\s+/i, "")
+    .trim()
+    .slice(0, 40);
+  const words = cleaned.split(/\s+/).filter(Boolean).slice(0, maxWords);
+  return words.map(titleCaseWord).join(" ");
+}
+
+/**
+ * Ensure a Goal-like object always has `originShort`/`targetShort` populated,
+ * deriving them from the long fields when missing (legacy cached worlds).
+ */
+function withShortLabels(goal: Goal): Goal {
+  if (goal.originShort && goal.targetShort) return goal;
+  return {
+    ...goal,
+    originShort: goal.originShort || deriveShortLabel(goal.origin, 5),
+    targetShort: goal.targetShort || deriveShortLabel(goal.target, 4),
+  };
 }
 
 function buildGoalGenerationInstruction(userPromptHint?: string): string {
@@ -385,8 +450,12 @@ function buildGoalGenerationInstruction(userPromptHint?: string): string {
     );
   }
   lines.push(
+    "Also produce two SHORT display labels for the UI:",
+    "  - origin_short: a concise place name, max 5 words, Title Case, no leading articles (\"a\", \"an\", \"the\"), no trailing punctuation. Example: \"Abandoned Mall\".",
+    "  - target_short: a concise object/landmark name, max 4 words, Title Case, no leading articles, no trailing punctuation. Example: \"Blue Grand Piano\".",
+    "These short labels MUST clearly identify the same origin/target as the long descriptions.",
     "Return ONLY valid JSON with these exact keys, no commentary:",
-    `{"origin":"...","target":"...","theme":"..."}`
+    `{"origin":"...","target":"...","theme":"...","origin_short":"...","target_short":"..."}`
   );
   return lines.join("\n");
 }
@@ -419,14 +488,23 @@ async function generateGoal(userPromptHint?: string): Promise<Goal> {
 
     const parsed = JSON.parse(
       (extractResponseText(data).match(/\{[\s\S]*\}/) ?? [extractResponseText(data)])[0]
-    ) as { origin?: string; target?: string; theme?: string };
+    ) as {
+      origin?: string;
+      target?: string;
+      theme?: string;
+      origin_short?: string;
+      target_short?: string;
+    };
 
     const origin = parsed.origin?.trim();
     const target = parsed.target?.trim();
     const theme = parsed.theme?.trim();
     if (!origin || !target || !theme) throw new Error("Goal response missing fields");
 
-    return { origin, target, theme, moves: 0, won: false };
+    const originShort = parsed.origin_short?.trim() || deriveShortLabel(origin, 5);
+    const targetShort = parsed.target_short?.trim() || deriveShortLabel(target, 4);
+
+    return { origin, target, theme, originShort, targetShort, moves: 0, won: false };
   } catch {
     const fallback = pickFallbackGoal();
     return { ...fallback, moves: 0, won: false };
@@ -796,7 +874,7 @@ async function nodePayload(world: World, nodeId: string, cacheHit: boolean): Pro
     cacheHit,
     promptUsed: node.prompt,
     target: node.target,
-    goal: world.goal ?? null,
+    goal: world.goal ? withShortLabels(world.goal) : null,
   };
 }
 
@@ -809,6 +887,8 @@ async function getOrCreateOrigin(world: World): Promise<NodePayload> {
   if (!world.goal) {
     const hint = world.prompt?.trim() || undefined;
     world.goal = await generateGoal(hint);
+  } else {
+    world.goal = withShortLabels(world.goal);
   }
   const prompt = buildOriginPrompt(world.goal);
   const imageUrl = await generateImage(prompt);
@@ -948,7 +1028,7 @@ export async function enterTarget({
     cacheHit: false,
     promptUsed: destinationPrompt,
     target: world.nodes[nodeId].target ?? null,
-    goal: world.goal ?? null,
+    goal: world.goal ? withShortLabels(world.goal) : null,
   };
 }
 
@@ -957,15 +1037,15 @@ export async function markGoalFound(worldId: string): Promise<Goal> {
   if (!world) throw new Error("World not found");
   if (!world.goal) throw new Error("This world has no active goal");
   if (!world.goal.won) {
-    world.goal = {
+    world.goal = withShortLabels({
       ...world.goal,
       won: true,
       wonAt: new Date().toISOString(),
       wonEvidence: world.goal.wonEvidence || "Manually marked as found.",
-    };
+    });
     await upsertWorld(world);
   }
-  return world.goal;
+  return withShortLabels(world.goal);
 }
 
 export async function getWorldHistory(): Promise<WorldHistoryResponse> {
@@ -980,6 +1060,7 @@ export async function getWorldHistory(): Promise<WorldHistoryResponse> {
       if (!originImage && isGraphNode(originNode) && originNode.legacy?.x !== undefined && originNode.legacy?.y !== undefined) {
         originImage = await getImage(legacyImageKey(world.world_id, originNode.legacy.x, originNode.legacy.y));
       }
+      const goal = world.goal ? withShortLabels(world.goal) : null;
       return {
         world_id: world.world_id,
         prompt: world.prompt,
@@ -987,14 +1068,86 @@ export async function getWorldHistory(): Promise<WorldHistoryResponse> {
         created_at: world.created_at,
         node_count: Object.keys(world.nodes).length,
         origin_image_url: originImage,
-        goal_origin: world.goal?.origin ?? null,
-        goal_target: world.goal?.target ?? null,
-        goal_theme: world.goal?.theme ?? null,
-        goal_moves: world.goal?.moves ?? null,
-        goal_won: world.goal?.won ?? null,
+        goal_origin: goal?.origin ?? null,
+        goal_target: goal?.target ?? null,
+        goal_origin_short: goal?.originShort ?? null,
+        goal_target_short: goal?.targetShort ?? null,
+        goal_theme: goal?.theme ?? null,
+        goal_moves: goal?.moves ?? null,
+        goal_won: goal?.won ?? null,
       };
     })
   );
 
   return { worlds: summaries };
+}
+
+export async function getWorldMoveTree(worldId: string): Promise<WorldMoveTreeResponse> {
+  const world = await readWorld(worldId);
+  if (!world) throw new Error("World not found");
+  const currentWorld = world;
+
+  const graphNodes = Object.values(currentWorld.nodes).filter(isGraphNode);
+  if (!graphNodes.length) {
+    return { world_id: currentWorld.world_id, nodes: [] };
+  }
+
+  const childrenByParent = new Map<string, WorldNode[]>();
+  for (const node of graphNodes) {
+    if (!node.parent_id) continue;
+    const siblings = childrenByParent.get(node.parent_id) ?? [];
+    siblings.push(node);
+    childrenByParent.set(node.parent_id, siblings);
+  }
+  for (const siblings of childrenByParent.values()) {
+    siblings.sort(
+      (left, right) =>
+        new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+    );
+  }
+
+  const depthById = new Map<string, number>();
+  function depthOf(node: WorldNode): number {
+    const cached = depthById.get(node.id);
+    if (cached !== undefined) return cached;
+    if (!node.parent_id) {
+      depthById.set(node.id, 0);
+      return 0;
+    }
+    const parent = currentWorld.nodes[node.parent_id];
+    const depth = isGraphNode(parent) ? depthOf(parent) + 1 : 1;
+    depthById.set(node.id, depth);
+    return depth;
+  }
+
+  const orderedNodes: WorldNode[] = [];
+  const visited = new Set<string>();
+  function walk(nodeId: string): void {
+    if (visited.has(nodeId)) return;
+    const node = currentWorld.nodes[nodeId];
+    if (!isGraphNode(node)) return;
+    visited.add(nodeId);
+    orderedNodes.push(node);
+    const children = childrenByParent.get(nodeId) ?? [];
+    for (const child of children) {
+      walk(child.id);
+    }
+  }
+
+  walk(ORIGIN_NODE_ID);
+  for (const node of graphNodes) {
+    walk(node.id);
+  }
+
+  const nodes = orderedNodes.map((node, index): MoveTreeNode => ({
+    node_id: node.id,
+    parent_node_id: node.parent_id,
+    created_at: node.created_at,
+    depth: depthOf(node),
+    step: index,
+    target_label: node.target?.targetLabel ?? null,
+    is_origin: node.id === ORIGIN_NODE_ID,
+  }));
+
+  return { world_id: currentWorld.world_id, nodes };
 }
