@@ -94,6 +94,9 @@ export default function App() {
   const [activeNode, setActiveNode] = useState<NodePayload | null>(null);
   const [goal, setGoal] = useState<Goal | null>(null);
   const [winDismissed, setWinDismissed] = useState(false);
+  const [viewerPanDragging, setViewerPanDragging] = useState(false);
+  /** True once this pointer session moved past the click threshold (pan / look drag). */
+  const panGripRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
   const isDev = import.meta.env.DEV;
 
@@ -182,7 +185,7 @@ export default function App() {
     }
 
     setBusy(true);
-    setStatus("Inspecting target and generating next view...");
+    setStatus("Inspecting target...");
     try {
       const data = await enterTarget({
         worldId: worldState.worldId,
@@ -194,7 +197,6 @@ export default function App() {
           setStatus(progress === "inspect" ? "Inspecting target..." : "Generating next view...");
         },
       });
-      setStatus(data.cacheHit ? "Reopening cached target..." : "Generating next view...");
       renderPanorama(data);
       if (data.goal?.won) {
         setStatus(`You found ${data.goal.target} in ${data.goal.moves} move${data.goal.moves === 1 ? "" : "s"}!`);
@@ -268,6 +270,13 @@ export default function App() {
     };
   }, [activeNode]);
 
+  useEffect(() => {
+    if (busy || !worldState.worldId) {
+      panGripRef.current = false;
+      setViewerPanDragging(false);
+    }
+  }, [busy, worldState.worldId]);
+
   function shouldIgnorePointerTarget(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return false;
     return Boolean(
@@ -278,8 +287,12 @@ export default function App() {
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0 || busy || !worldState.worldId || shouldIgnorePointerTarget(event.target)) {
       pointerStartRef.current = null;
+      panGripRef.current = false;
+      setViewerPanDragging(false);
       return;
     }
+    panGripRef.current = false;
+    setViewerPanDragging(false);
     pointerStartRef.current = {
       x: event.clientX,
       y: event.clientY,
@@ -288,7 +301,21 @@ export default function App() {
     };
   }
 
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    const pointerStart = pointerStartRef.current;
+    if (!pointerStart || event.pointerId !== pointerStart.pointerId || busy || !worldState.worldId) return;
+    if (panGripRef.current) return;
+    const dx = event.clientX - pointerStart.x;
+    const dy = event.clientY - pointerStart.y;
+    if (Math.hypot(dx, dy) > CLICK_MOVE_THRESHOLD_PX) {
+      panGripRef.current = true;
+      setViewerPanDragging(true);
+    }
+  }
+
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+    panGripRef.current = false;
+    setViewerPanDragging(false);
     const pointerStart = pointerStartRef.current;
     pointerStartRef.current = null;
     if (!pointerStart || pointerStart.pointerId !== event.pointerId) return;
@@ -399,10 +426,15 @@ export default function App() {
 
         <main className="viewer-panel panel">
           <div
-            className={`panorama-wrap ${worldState.worldId && !busy ? "clickable" : ""}`}
+            className={`panorama-wrap ${worldState.worldId && !busy ? "clickable" : ""} ${
+              viewerPanDragging ? "viewer-pan-dragging" : ""
+            }`}
             onPointerDown={handlePointerDown}
+            onPointerMoveCapture={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={() => {
+              panGripRef.current = false;
+              setViewerPanDragging(false);
               pointerStartRef.current = null;
             }}
           >

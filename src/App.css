@@ -212,8 +212,14 @@ button:disabled {
   position: relative;
 }
 
-.panorama-wrap.clickable #panorama {
-  cursor: crosshair;
+.panorama-wrap.clickable:not(.viewer-pan-dragging) #panorama,
+.panorama-wrap.clickable:not(.viewer-pan-dragging) #panorama :where(*) {
+  cursor: pointer !important;
+}
+
+.panorama-wrap.clickable.viewer-pan-dragging #panorama,
+.panorama-wrap.clickable.viewer-pan-dragging #panorama :where(*) {
+  cursor: grabbing !important;
 }
 
 #panorama {
