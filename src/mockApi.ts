@@ -53,6 +53,8 @@ type LegacyWorldNode = {
   x?: number;
   y?: number;
   prompt: string;
+  description?: string;
+  location?: string;
   created_at: string;
   last_move?: string | null;
 };
@@ -61,6 +63,8 @@ type WorldNode = {
   id: string;
   parent_id: string | null;
   prompt: string;
+  description: string;
+  location: string;
   created_at: string;
   target: TargetMetadata | null;
   legacy?: LegacyWorldNode;
@@ -223,6 +227,16 @@ function promptPreview(prompt: string): string {
   return prompt.length > 120 ? `${prompt.slice(0, 117)}...` : prompt;
 }
 
+function compactDescription(value: string): string {
+  const normalized = value.split(/\s+/).join(" ").trim();
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
+}
+
+function compactLocation(value: string): string {
+  const normalized = value.split(/\s+/).join(" ").trim();
+  return normalized.length > 320 ? `${normalized.slice(0, 317)}...` : normalized;
+}
+
 function isWorld(value: unknown): value is World {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<World>;
@@ -276,11 +290,22 @@ function normalizeWorld(world: World): World {
         id: ORIGIN_NODE_ID,
         parent_id: null,
         prompt: legacyOrigin.prompt,
+        description: legacyOrigin.description ?? world.prompt,
+        location: legacyOrigin.location ?? buildOriginLocation(world.prompt),
         created_at: legacyOrigin.created_at,
         target: null,
         legacy: legacyOrigin,
       };
     }
+  } else {
+    origin.description ||= buildOriginDescription(world.prompt);
+    origin.location ||= buildOriginLocation(world.prompt);
+  }
+
+  for (const node of Object.values(nextWorld.nodes)) {
+    if (!isGraphNode(node)) continue;
+    node.description ||= node.legacy?.description ?? world.prompt;
+    node.location ||= node.legacy?.location ?? buildOriginLocation(world.prompt);
   }
 
   return nextWorld;
@@ -300,51 +325,67 @@ async function upsertWorld(nextWorld: World): Promise<void> {
   await putWorldInDB(normalizeWorld(nextWorld));
 }
 
+function buildOriginDescription(worldPrompt: string): string {
+  return worldPrompt;
+}
+
+function buildOriginLocation(worldPrompt: string): string {
+  return compactLocation(worldPrompt);
+}
+
 function buildOriginPrompt(worldPrompt: string): string {
   return [
     `World description: ${worldPrompt}`,
-    "Generate the entry viewpoint for this world.",
-    "Generate a seamless full 360-degree equirectangular panorama, 2:1 aspect ratio, immersive street-view style environment, no text, no UI, no borders.",
+    "Generate a seamless full 360-degree equirectangular panorama, no text, no UI, no borders.",
   ].join("\n");
 }
 
-function buildVisionInstruction(worldPrompt: string, pitch: number, yaw: number): string {
+function buildVisionInstruction(currentContext: string, currentLocation: string, pitch: number, yaw: number): string {
   return [
-    "Label the object or area at the center of the attached crop.",
-    `World description: ${worldPrompt}`,
-    `Click location in the source panorama: pitch ${pitch.toFixed(1)}, yaw ${yaw.toFixed(1)}.`,
-    "Return exactly one short noun phrase.",
+    "You are provided a 360 panorama and a cropped view of the target area. Label the object or area at the center of the attached crop with its relevant position in the scene.",
+    `Current view: ${currentContext}`,
+    `Current physical location: ${currentLocation}`,
+    "Return exactly one concise phrase.",
     "Do not return JSON, punctuation, explanations, full sentences, or alternatives.",
-    "Examples: window, framed painting, bed pillow, desk lamp, wooden door.",
+    "Examples: storage boxes below the bed, framed painting on the wall above the bed, wooden door at the end of the hallway, window above the desk facing the courtyard.",
   ].join("\n");
 }
 
 function buildDestinationPrompt({
-  worldPrompt,
-  currentPrompt,
+  currentContext,
+  currentLocation,
   targetLabel,
-  pitch,
-  yaw,
 }: {
-  worldPrompt: string;
-  currentPrompt: string;
+  currentContext: string;
+  currentLocation: string;
   targetLabel: string;
-  pitch: number;
-  yaw: number;
-}): string {
-  return [
-    `World description: ${worldPrompt}`,
-    `Current view context: ${currentPrompt}`,
-    `The user clicked on: ${targetLabel}.`,
-    `Click location in the previous panorama: pitch ${pitch.toFixed(1)}, yaw ${yaw.toFixed(1)}.`,
+}): { prompt: string; description: string; location: string } {
+  const currentView = compactDescription(currentContext);
+  const location = buildChildLocation(currentLocation, targetLabel);
+  const description = compactDescription(
+    `A 360 view reached by moving into or through the ${targetLabel}. It continues from: ${currentView}`
+  );
+  const prompt = [
+    `Current view: ${currentView}`,
+    `Physical location: ${location}`,
+    `Create the next immersive 360 view as if the camera moved into or through the ${targetLabel}.`,
     "Reference images provided: the full current panorama and a small crop centered on the clicked target.",
-    `Generate the next immersive viewpoint as if the camera moved into or through the ${targetLabel}.`,
     "Preserve visual continuity with the previous panorama: same overall art direction, lighting temperature, material quality, camera height, lens feel, and environmental mood.",
     "Use the clicked crop as the strongest local reference for color, texture, object identity, and transition direction.",
-    "If the clicked target is a portal-like object such as a window, doorway, mirror, screen, poster, or painting, place the camera just beyond or inside that target's implied space.",
-    "If the clicked target is an ordinary object or surface, move close enough that the new 360 view plausibly explores the object's immediate surrounding micro-environment.",
-    "Generate a seamless full 360-degree equirectangular panorama, 2:1 aspect ratio, immersive street-view style environment, no text, no UI, no borders.",
+    "If the clicked target is closed, such as a closed drawer, cabinet, or closet, keep the exact same view but now open the target object.",
+    "If the clicked target is a portal-like object such as a window, doorway, open it and make a best-effort guess on what's behind it, then place the camera just beyond the target object.",
+    "If the clicked target is an object with an implied universe, such as a specific book, poster, photograph, painting, a drain cover, place the camera inside that object's implied universe.",
+    "In all other cases, if the clicked target is simply a point in an open space, or if the object is ambiguous, just move close enough that the new 360 view plausibly explores the object's immediate surrounding micro-environment.",
+    "Use the provided full panorama and target crop as visual references.",
+    "Keep style, lighting, materials, camera height, and mood consistent with the references.",
+    "Output a seamless equirectangular 360 panorama. No text, UI, borders, or captions.",
   ].join("\n");
+  return { prompt, description, location };
+}
+
+function buildChildLocation(currentLocation: string, targetLabel: string): string {
+  const parentLocation = compactLocation(currentLocation);
+  return compactLocation(`inside or beyond ${targetLabel}, within ${parentLocation}`);
 }
 
 function extractResponseText(data: OpenAIResponse): string {
@@ -465,12 +506,14 @@ async function cropClickTargetImage({
 }
 
 async function analyzeClickTargetWithCrop({
-  worldPrompt,
+  currentContext,
+  currentLocation,
   sourceImageUrl,
   pitch,
   yaw,
 }: {
-  worldPrompt: string;
+  currentContext: string;
+  currentLocation: string;
   sourceImageUrl: string;
   pitch: number;
   yaw: number;
@@ -488,8 +531,9 @@ async function analyzeClickTargetWithCrop({
         {
           role: "user",
           content: [
-            { type: "input_text", text: buildVisionInstruction(worldPrompt, pitch, yaw) },
+            { type: "input_text", text: buildVisionInstruction(currentContext, currentLocation, pitch, yaw) },
             { type: "input_image", image_url: targetCropUrl, detail: "low" },
+            { type: "input_image", image_url: sourceImageUrl, detail: "low" },
           ],
         },
       ],
@@ -522,8 +566,8 @@ async function generateImage(prompt: string): Promise<string> {
       model: OPENAI_IMAGE_MODEL,
       prompt,
       n: 1,
-      size: "1536x1024",
-      quality: "medium",
+      size: "1024x640",
+      quality: "high",
       output_format: "png",
     }),
   });
@@ -559,8 +603,8 @@ async function generateImageFromReferences({
       images: [{ image_url: sourceImageUrl }, { image_url: targetCropUrl }],
       prompt,
       n: 1,
-      size: "1536x1024",
-      quality: "medium",
+      size: "1024x640",
+      quality: "high",
       output_format: "png"
     }),
   });
@@ -604,6 +648,11 @@ async function nodePayload(world: World, nodeId: string, cacheHit: boolean): Pro
 async function getOrCreateOrigin(world: World): Promise<NodePayload> {
   const existingOrigin = world.nodes[ORIGIN_NODE_ID];
   if (isGraphNode(existingOrigin)) {
+    if (!existingOrigin.description || !existingOrigin.location) {
+      existingOrigin.description = buildOriginDescription(world.prompt);
+      existingOrigin.location = buildOriginLocation(world.prompt);
+      await upsertWorld(world);
+    }
     return nodePayload(world, ORIGIN_NODE_ID, true);
   }
 
@@ -614,6 +663,8 @@ async function getOrCreateOrigin(world: World): Promise<NodePayload> {
     id: ORIGIN_NODE_ID,
     parent_id: null,
     prompt,
+    description: buildOriginDescription(world.prompt),
+    location: buildOriginLocation(world.prompt),
     created_at: new Date().toISOString(),
     target: null,
   };
@@ -680,22 +731,21 @@ export async function enterTarget({
   const quantizedYaw = quantizeAngle(yaw);
   onProgress?.("inspect");
   const { targetLabel, targetCropUrl } = await analyzeClickTargetWithCrop({
-    worldPrompt: world.prompt,
+    currentContext: currentNode.description || world.prompt,
+    currentLocation: currentNode.location || buildOriginLocation(world.prompt),
     sourceImageUrl,
     pitch,
     yaw,
   });
-  const destinationPrompt = buildDestinationPrompt({
-    worldPrompt: world.prompt,
-    currentPrompt: currentNode.prompt,
+  const destination = buildDestinationPrompt({
+    currentContext: currentNode.description || world.prompt,
+    currentLocation: currentNode.location || buildOriginLocation(world.prompt),
     targetLabel,
-    pitch,
-    yaw,
   });
   const nodeId = nodeIdFromEdge(world.world_id, edgeKey);
   onProgress?.("generate");
   const imageUrl = await generateImageFromReferences({
-    prompt: destinationPrompt,
+    prompt: destination.prompt,
     sourceImageUrl,
     targetCropUrl,
   });
@@ -703,7 +753,9 @@ export async function enterTarget({
   world.nodes[nodeId] = {
     id: nodeId,
     parent_id: parentNodeId,
-    prompt: destinationPrompt,
+    prompt: destination.prompt,
+    description: destination.description,
+    location: destination.location,
     created_at: new Date().toISOString(),
     target: {
       targetLabel,
@@ -722,7 +774,7 @@ export async function enterTarget({
     parentNodeId,
     imageUrl,
     cacheHit: false,
-    promptUsed: destinationPrompt,
+    promptUsed: destination.prompt,
     target: world.nodes[nodeId].target ?? null,
   };
 }
