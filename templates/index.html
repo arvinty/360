@@ -68,6 +68,50 @@
         border: 1px solid #2c3240;
       }
 
+      .panorama-wrap {
+        position: relative;
+      }
+
+      .dpad {
+        position: absolute;
+        right: 16px;
+        bottom: 16px;
+        display: grid;
+        grid-template-columns: 48px 48px 48px;
+        grid-template-rows: 48px 48px 48px;
+        gap: 6px;
+        z-index: 20;
+      }
+
+      .dpad button {
+        padding: 0;
+        border-radius: 10px;
+        background: rgba(47, 124, 255, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      #moveNorth {
+        grid-column: 2;
+        grid-row: 1;
+      }
+
+      #moveWest {
+        grid-column: 1;
+        grid-row: 2;
+      }
+
+      #moveEast {
+        grid-column: 3;
+        grid-row: 2;
+      }
+
+      #moveSouth {
+        grid-column: 2;
+        grid-row: 3;
+      }
+
       #hud {
         margin-top: 10px;
         display: flex;
@@ -88,7 +132,15 @@
         <button id="reloadNode">Reload Node</button>
       </div>
       <div id="status">Ready.</div>
-      <div id="panorama"></div>
+      <div class="panorama-wrap">
+        <div id="panorama"></div>
+        <div class="dpad">
+          <button id="moveNorth" title="Move North">N</button>
+          <button id="moveWest" title="Move West">W</button>
+          <button id="moveEast" title="Move East">E</button>
+          <button id="moveSouth" title="Move South">S</button>
+        </div>
+      </div>
       <div id="hud">
         <div id="worldId">World: -</div>
         <div id="coord">Coord: (0, 0)</div>
@@ -105,6 +157,10 @@
       const worldIdText = document.getElementById("worldId");
       const coordText = document.getElementById("coord");
       const cacheText = document.getElementById("cache");
+      const moveNorthButton = document.getElementById("moveNorth");
+      const moveSouthButton = document.getElementById("moveSouth");
+      const moveEastButton = document.getElementById("moveEast");
+      const moveWestButton = document.getElementById("moveWest");
 
       let viewer = null;
       let worldState = {
@@ -112,6 +168,13 @@
         x: 0,
         y: 0
       };
+
+      function setMoveButtonsDisabled(disabled) {
+        moveNorthButton.disabled = disabled;
+        moveSouthButton.disabled = disabled;
+        moveEastButton.disabled = disabled;
+        moveWestButton.disabled = disabled;
+      }
 
       function moveSpot(yaw, pitch, direction, label) {
         return {
@@ -156,6 +219,7 @@
 
       async function startWorld() {
         startWorldButton.disabled = true;
+        setMoveButtonsDisabled(true);
         statusText.textContent = "Starting world and loading origin node...";
         try {
           const response = await fetch("/world/start", {
@@ -174,6 +238,7 @@
           statusText.textContent = `Error: ${error.message}`;
         } finally {
           startWorldButton.disabled = false;
+          setMoveButtonsDisabled(false);
         }
       }
 
@@ -182,6 +247,7 @@
           statusText.textContent = "Start a world first.";
           return;
         }
+        setMoveButtonsDisabled(true);
         statusText.textContent = `Moving ${direction}...`;
         try {
           const response = await fetch("/world/move", {
@@ -202,6 +268,8 @@
           statusText.textContent = `Moved ${direction}. Drag to explore this node.`;
         } catch (error) {
           statusText.textContent = `Error: ${error.message}`;
+        } finally {
+          setMoveButtonsDisabled(false);
         }
       }
 
@@ -231,6 +299,11 @@
 
       startWorldButton.addEventListener("click", startWorld);
       reloadNodeButton.addEventListener("click", reloadCurrentNode);
+      moveNorthButton.addEventListener("click", () => move("north"));
+      moveSouthButton.addEventListener("click", () => move("south"));
+      moveEastButton.addEventListener("click", () => move("east"));
+      moveWestButton.addEventListener("click", () => move("west"));
+      setMoveButtonsDisabled(true);
     </script>
   </body>
 </html>
