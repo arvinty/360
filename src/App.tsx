@@ -2,8 +2,10 @@ import { type PointerEvent, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_PROMPT,
   enterTarget,
+  type Goal,
   getWorldHistory,
   getWorldNode,
+  markGoalFound,
   type NodePayload,
   startWorld as startWorldRequest,
   type WorldSummary,
@@ -55,9 +57,26 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
+function goalStageLabel(moves: number): string {
+  if (moves <= 2) return "vague";
+  if (moves <= 5) return "stronger";
+  return "reveal";
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function historyTitle(world: WorldSummary): string {
+  if (world.goal_origin && world.goal_target) {
+    return `${truncate(world.goal_origin, 60)} → ${truncate(world.goal_target, 40)}`;
+  }
+  return world.prompt_preview || "Untitled world";
+}
+
 export default function App() {
   const viewerRef = useRef<PannellumViewer | null>(null);
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [prompt, setPrompt] = useState("");
   const [status, setStatus] = useState("Ready.");
   const [busy, setBusy] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -73,13 +92,17 @@ export default function App() {
   const [cacheState, setCacheState] = useState("-");
   const [targetState, setTargetState] = useState("-");
   const [activeNode, setActiveNode] = useState<NodePayload | null>(null);
+  const [goal, setGoal] = useState<Goal | null>(null);
+  const [winDismissed, setWinDismissed] = useState(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
+  const isDev = import.meta.env.DEV;
 
   function renderPanorama(payload: NodePayload) {
     setActiveNode(payload);
     setWorldState({ worldId: payload.worldId, nodeId: payload.nodeId });
     setCacheState(payload.cacheHit ? "hit" : "miss");
     setTargetState(payload.target?.targetLabel ?? "-");
+    setGoal(payload.goal);
   }
 
   async function loadHistory() {
@@ -95,14 +118,39 @@ export default function App() {
     }
   }
 
-  async function startWorld() {
+  async function startWorld(promptOverride?: string) {
     setBusy(true);
-    setStatus("Starting world and loading origin node...");
+    setStatus("Starting world and generating origin + goal...");
+    setWinDismissed(false);
     try {
-      const data = await startWorldRequest(prompt);
+      const data = await startWorldRequest(promptOverride ?? prompt);
       renderPanorama(data);
       setStatus("World ready. Drag to look around, click a target to enter it.");
       await loadHistory();
+    } catch (error) {
+      setStatus(`Error: ${getErrorMessage(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startNewGame() {
+    const userHint = prompt.trim();
+    if (!userHint) {
+      await startWorld("");
+      return;
+    }
+    const seed = Math.random().toString(36).slice(2, 8);
+    await startWorld(`${userHint} :: seed-${seed}`);
+  }
+
+  async function handleMarkFound() {
+    if (!worldState.worldId) return;
+    setBusy(true);
+    try {
+      const updated = await markGoalFound(worldState.worldId);
+      setGoal(updated);
+      setStatus(`Marked ${updated.target} as found.`);
     } catch (error) {
       setStatus(`Error: ${getErrorMessage(error)}`);
     } finally {
@@ -114,6 +162,7 @@ export default function App() {
     if (!worldId) return;
     setBusy(true);
     setStatus("Opening cached world...");
+    setWinDismissed(false);
     try {
       const data = await getWorldNode(worldId);
       renderPanorama(data);
@@ -147,11 +196,15 @@ export default function App() {
       });
       setStatus(data.cacheHit ? "Reopening cached target..." : "Generating next view...");
       renderPanorama(data);
-      setStatus(
-        data.target?.targetLabel
-          ? `Entered ${data.target.targetLabel}.`
-          : "Entered the clicked target."
-      );
+      if (data.goal?.won) {
+        setStatus(`You found ${data.goal.target} in ${data.goal.moves} move${data.goal.moves === 1 ? "" : "s"}!`);
+      } else {
+        setStatus(
+          data.target?.targetLabel
+            ? `Entered ${data.target.targetLabel}.`
+            : "Entered the clicked target."
+        );
+      }
       await loadHistory();
     } catch (error) {
       setStatus(`Error: ${getErrorMessage(error)}`);
@@ -267,15 +320,29 @@ export default function App() {
       <div className="layout">
         <aside className="sidebar panel">
           <section>
-            <h2 className="section-title">World Prompt</h2>
-            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+            <h2 className="section-title">World Prompt (optional style hint)</h2>
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder={`Optional. Describe the world you want to start in.\nExample: ${DEFAULT_PROMPT}\nLeave empty to let the game invent something for you.`}
+            />
             <div className="button-row">
-              <button disabled={busy} onClick={startWorld}>
-                Start World
+              <button disabled={busy} onClick={() => startWorld()}>
+                Start Game
               </button>
+              <button className="secondary" disabled={busy} onClick={startNewGame}>
+                New Game
+              </button>
+            </div>
+            <div className="button-row">
               <button className="secondary" disabled={busy} onClick={reloadCurrentNode}>
                 Reload Node
               </button>
+              {isDev && goal && !goal.won && (
+                <button className="secondary" disabled={busy} onClick={handleMarkFound}>
+                  Mark Found (dev)
+                </button>
+              )}
             </div>
           </section>
 
@@ -314,10 +381,15 @@ export default function App() {
                         loading="lazy"
                       />
                     )}
-                    <strong>{world.prompt_preview || "Untitled world"}</strong>
+                    <strong>{historyTitle(world)}</strong>
                     <div className="meta">
                       <span>{formatCreatedAt(world.created_at)}</span>
                       <span>{world.node_count || 0} nodes</span>
+                      {world.goal_moves !== null && (
+                        <span>
+                          {world.goal_won ? `won · ${world.goal_moves} mv` : `${world.goal_moves} mv`}
+                        </span>
+                      )}
                     </div>
                   </button>
                 ))}
@@ -335,14 +407,49 @@ export default function App() {
             }}
           >
             <div id="panorama" className={!worldState.worldId ? "empty" : ""} />
-            {!worldState.worldId && <div className="empty-message">Start or open a world.</div>}
+            {!worldState.worldId && <div className="empty-message">Start a game.</div>}
+            {goal && !goal.won && (
+              <div className="goal-banner">
+                <span className="goal-label">Find:</span> {goal.target}
+                <span className="goal-stage"> · move {goal.moves} · {goalStageLabel(goal.moves)}</span>
+              </div>
+            )}
+            {goal?.won && !winDismissed && (
+              <div className="win-overlay" role="dialog" aria-modal="true">
+                <div className="win-card">
+                  <h2>You found {goal.target}!</h2>
+                  <p>
+                    Solved in {goal.moves} move{goal.moves === 1 ? "" : "s"}.
+                  </p>
+                  {goal.wonEvidence && <p className="win-evidence">"{goal.wonEvidence}"</p>}
+                  <div className="button-row">
+                    <button disabled={busy} onClick={startNewGame}>
+                      New Game
+                    </button>
+                    <button className="secondary" onClick={() => setWinDismissed(true)}>
+                      Keep exploring
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="hud">
             <div>World: {worldState.worldId ?? "-"}</div>
             <div>Node: {worldState.nodeId ?? "-"}</div>
             <div>Cache: {cacheState}</div>
-            <div>Target: {targetState}</div>
+            <div>Click target: {targetState}</div>
+            {goal && (
+              <>
+                <div>Origin: {goal.origin}</div>
+                <div>Goal: {goal.target}</div>
+                <div>
+                  Move {goal.moves} · stage {goalStageLabel(goal.moves)}
+                  {goal.won ? " · WON" : ""}
+                </div>
+              </>
+            )}
           </div>
         </main>
       </div>

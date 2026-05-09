@@ -95,6 +95,11 @@ textarea {
   line-height: 1.4;
 }
 
+textarea::placeholder {
+  color: rgba(169, 180, 198, 0.55);
+  font-style: italic;
+}
+
 textarea:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
@@ -231,6 +236,81 @@ button:disabled {
   place-items: center;
   color: #c9d2e0;
   pointer-events: none;
+}
+
+.goal-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(10, 13, 17, 0.78);
+  border: 1px solid rgba(154, 192, 255, 0.4);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+  max-width: calc(100% - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.goal-banner .goal-label {
+  color: var(--accent);
+  margin-right: 4px;
+}
+
+.goal-banner .goal-stage {
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.win-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 12, 18, 0.62);
+  backdrop-filter: blur(4px);
+  border-radius: 8px;
+  z-index: 10;
+}
+
+.win-card {
+  background: var(--panel);
+  border: 1px solid rgba(154, 192, 255, 0.5);
+  border-radius: 12px;
+  padding: 24px 28px;
+  max-width: 460px;
+  text-align: center;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.55);
+}
+
+.win-card h2 {
+  margin: 0 0 8px;
+  font-size: 22px;
+  color: var(--text);
+}
+
+.win-card p {
+  margin: 4px 0;
+  color: var(--muted);
+}
+
+.win-card .win-evidence {
+  margin-top: 10px;
+  font-style: italic;
+  color: #d7deec;
+}
+
+.win-card .button-row {
+  margin-top: 18px;
 }
 
 .hud {

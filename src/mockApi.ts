@@ -25,6 +25,18 @@ export type TargetMetadata = {
   quantizedYaw: number;
 };
 
+export type Goal = {
+  origin: string;
+  target: string;
+  theme: string;
+  moves: number;
+  won: boolean;
+  wonAt?: string;
+  wonEvidence?: string;
+};
+
+export type GoalStage = "vague" | "stronger" | "reveal";
+
 export type NodePayload = {
   worldId: string;
   nodeId: string;
@@ -33,6 +45,7 @@ export type NodePayload = {
   cacheHit: boolean;
   promptUsed: string;
   target: TargetMetadata | null;
+  goal: Goal | null;
 };
 
 export type WorldSummary = {
@@ -42,6 +55,11 @@ export type WorldSummary = {
   created_at: string;
   node_count: number;
   origin_image_url: string | null;
+  goal_origin: string | null;
+  goal_target: string | null;
+  goal_theme: string | null;
+  goal_moves: number | null;
+  goal_won: boolean | null;
 };
 
 export type WorldHistoryResponse = {
@@ -73,6 +91,7 @@ type World = {
   grid?: { movement: string };
   nodes: Record<string, WorldNode | LegacyWorldNode>;
   edges?: Record<string, string>;
+  goal?: Goal;
 };
 
 type OpenAIImageResponse = {
@@ -92,6 +111,8 @@ type VisionTargetResponse = {
   target_label?: string;
   transition_summary?: string;
   destination_prompt?: string;
+  goal_visible?: boolean;
+  goal_evidence?: string;
 };
 
 // ── IndexedDB image store ──────────────────────────────────────────────────
@@ -300,25 +321,193 @@ async function upsertWorld(nextWorld: World): Promise<void> {
   await putWorldInDB(normalizeWorld(nextWorld));
 }
 
-function buildOriginPrompt(worldPrompt: string): string {
+function buildOriginPrompt(goal: Goal): string {
   return [
-    `World description: ${worldPrompt}`,
+    `World description: ${goal.origin}`,
     "Generate the entry viewpoint for this world.",
+    `The player is secretly searching for: ${goal.target}. Do NOT include the target or its obvious parts in this opening view.`,
     "Generate a seamless full 360-degree equirectangular panorama, 2:1 aspect ratio, immersive street-view style environment, no text, no UI, no borders.",
   ].join("\n");
 }
 
-function buildVisionInstruction(worldPrompt: string, pitch: number, yaw: number): string {
-  return [
+const GOAL_FALLBACKS: Array<Pick<Goal, "origin" | "target" | "theme">> = [
+  {
+    origin: "an abandoned shopping mall, dim flickering fluorescent lights, dusty escalators",
+    target: "a blue grand piano",
+    theme: "music, melancholy, dust",
+  },
+  {
+    origin: "a quiet snowy alpine village at dusk, warm lit windows, fresh snowfall",
+    target: "a vintage red telephone booth",
+    theme: "communication, nostalgia, isolation",
+  },
+  {
+    origin: "a sprawling neon-lit night market in a futuristic city",
+    target: "a centuries-old jade dragon statue",
+    theme: "tradition meeting future, jade green, incense",
+  },
+  {
+    origin: "an overgrown botanical garden inside a derelict glasshouse",
+    target: "an astronaut helmet on a pedestal",
+    theme: "exploration, oxygen, distant stars",
+  },
+  {
+    origin: "a coastal lighthouse and its keeper's cottage on a stormy night",
+    target: "a hot air balloon basket",
+    theme: "flight, ropes, woven baskets, sky",
+  },
+];
+
+function pickFallbackGoal(): Pick<Goal, "origin" | "target" | "theme"> {
+  return GOAL_FALLBACKS[Math.floor(Math.random() * GOAL_FALLBACKS.length)];
+}
+
+function buildGoalGenerationInstruction(userPromptHint?: string): string {
+  const trimmedHint = userPromptHint?.trim();
+  const lines = [
+    "You are designing a Wiki-Racer-style 360 exploration game.",
+    "The player begins in an ORIGIN environment and must wander through AI-generated 360 scenes until they find a hidden TARGET.",
+  ];
+  if (trimmedHint) {
+    lines.push(
+      `User description of the world: "${trimmedHint}".`,
+      "You MUST base the ORIGIN environment on this user description (faithfully expand it into an evocative, visually rich place, building, or environment).",
+      "Pick a TARGET that is a specific, visually distinctive object, person, or landmark that does NOT naturally belong in that origin.",
+      "Pick a THEME: 3-8 words of hidden steering vocabulary that semantically links the origin toward the target (mood, materials, motifs)."
+    );
+  } else {
+    lines.push(
+      "No user description provided. Invent something fresh and surprising.",
+      "Pick an ORIGIN that is evocative and visually rich (a place, building, or environment).",
+      "Pick a TARGET that is a specific, visually distinctive object, person, or landmark that does NOT naturally belong in the origin.",
+      "Pick a THEME: 3-8 words of hidden steering vocabulary that semantically links the origin toward the target (mood, materials, motifs)."
+    );
+  }
+  lines.push(
+    "Return ONLY valid JSON with these exact keys, no commentary:",
+    `{"origin":"...","target":"...","theme":"..."}`
+  );
+  return lines.join("\n");
+}
+
+async function generateGoal(userPromptHint?: string): Promise<Goal> {
+  try {
+    const response = await fetch(OPENAI_RESPONSES_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${getApiKey()}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_VISION_MODEL,
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: buildGoalGenerationInstruction(userPromptHint) },
+            ],
+          },
+        ],
+      }),
+    });
+
+    const data = (await response.json().catch(() => ({}))) as OpenAIResponse;
+    if (!response.ok) {
+      throw new Error(data.error?.message || "Goal generation failed");
+    }
+
+    const parsed = JSON.parse(
+      (extractResponseText(data).match(/\{[\s\S]*\}/) ?? [extractResponseText(data)])[0]
+    ) as { origin?: string; target?: string; theme?: string };
+
+    const origin = parsed.origin?.trim();
+    const target = parsed.target?.trim();
+    const theme = parsed.theme?.trim();
+    if (!origin || !target || !theme) throw new Error("Goal response missing fields");
+
+    return { origin, target, theme, moves: 0, won: false };
+  } catch {
+    const fallback = pickFallbackGoal();
+    return { ...fallback, moves: 0, won: false };
+  }
+}
+
+const GOAL_VAGUE_MAX_MOVES = 2;
+const GOAL_STRONGER_MAX_MOVES = 5;
+
+function goalStage(moves: number): GoalStage {
+  if (moves <= GOAL_VAGUE_MAX_MOVES) return "vague";
+  if (moves <= GOAL_STRONGER_MAX_MOVES) return "stronger";
+  return "reveal";
+}
+
+function buildVisionInstruction(
+  worldPrompt: string,
+  pitch: number,
+  yaw: number,
+  goal: Goal | null
+): string {
+  const base = [
     "You are powering a surreal click-to-enter 360 explorer.",
     `World description: ${worldPrompt}`,
     `The user clicked the current panorama at pitch ${pitch.toFixed(1)} degrees and yaw ${yaw.toFixed(1)} degrees.`,
     "Inspect the image and infer the most likely clicked visual target at that location.",
     "If the target is a window, doorway, mirror, screen, painting, poster, object, texture, or abstract detail, the next view should enter or pass through that target imaginatively.",
-    "Return only valid JSON with these keys:",
-    `{"target_label":"short noun phrase","transition_summary":"one sentence","destination_prompt":"detailed prompt for a seamless 360-degree equirectangular panorama destination"}`,
+  ];
+
+  if (!goal) {
+    base.push(
+      "Return only valid JSON with these keys:",
+      `{"target_label":"short noun phrase","transition_summary":"one sentence","destination_prompt":"detailed prompt for a seamless 360-degree equirectangular panorama destination"}`,
+      "The destination prompt must preserve the source world's style when useful, but it may enter impossible spaces such as a painting's world."
+    );
+    return base.join("\n");
+  }
+
+  const stage = goalStage(goal.moves);
+  base.push(
+    "",
+    "This is also a hidden goal-finding game.",
+    `World origin: ${goal.origin}.`,
+    `The player is secretly searching for: ${goal.target}.`,
+    `Hidden steering theme: ${goal.theme}.`,
+    `Current move count (this click is move ${goal.moves + 1}). Stage: ${stage}.`,
+    "",
+    "Drift policy:",
+    `  - vague (moves 0-${GOAL_VAGUE_MAX_MOVES}):     do NOT depict ${goal.target} or its parts. Only optional vague mood from the theme.`,
+    `  - stronger (moves ${GOAL_VAGUE_MAX_MOVES + 1}-${GOAL_STRONGER_MAX_MOVES}):  add subtle environmental hints related to the theme. Still no explicit target.`,
+    `  - reveal (moves ${GOAL_STRONGER_MAX_MOVES + 1}+):     if the clicked direction reasonably supports it, you MAY include ${goal.target} naturally. Do not force it; preserve dreamlike free exploration.`,
+    "",
+    "Continue the 360 world in the direction indicated by the clicked screenshot region. Use the clicked region as the main local continuation signal. Do not turn the world into a maze toward the target.",
+    "",
+    `STRICT WIN CHECK: also inspect the CURRENT image and decide if ${goal.target} is unmistakably present.`,
+    `Set "goal_visible" to true ONLY IF ALL of the following hold:`,
+    `  - A clear, identifiable instance of ${goal.target} occupies a visible portion of the panorama (not a tiny distant speck, not just a logo, not a reflection-only).`,
+    `  - The shape, color, and context match ${goal.target} so a player would point at it and say "there it is".`,
+    `  - It is the actual ${goal.target}, not a similar-looking object, a partial part, a silhouette, a sign or label naming it, or a picture/painting/poster of it.`,
+    `Set "goal_visible" to false for: faint outlines, "maybe in the mist/fog", barely-suggested forms, theme-only mood, lookalikes, signage, or any uncertainty.`,
+    `When true, "goal_evidence" MUST be a concrete short phrase naming what is seen and where (e.g. "center-left, full ${goal.target} body and base clearly visible, sharp colors"). When false, "goal_evidence" MUST be an empty string.`,
+    `When in doubt, return false.`,
+    "",
+    "Return ONLY valid JSON with these keys:",
+    `{"target_label":"short noun phrase","transition_summary":"one sentence","destination_prompt":"detailed prompt for a seamless 360-degree equirectangular panorama destination","goal_visible":true|false,"goal_evidence":"concrete phrase if true, empty string if false"}`,
     "The destination prompt must preserve the source world's style when useful, but it may enter impossible spaces such as a painting's world.",
-  ].join("\n");
+    "The destination prompt must respect the drift policy for the current stage."
+  );
+
+  return base.join("\n");
+}
+
+function buildDriftSuffix(goal: Goal | null): string {
+  if (!goal) return "";
+  const stage = goalStage(goal.moves);
+  if (stage === "vague") {
+    return `Do NOT include ${goal.target} or its obvious parts. Maintain a coherent continuation of the current world's style.`;
+  }
+  if (stage === "stronger") {
+    return `Subtly hint at the theme "${goal.theme}" through lighting, props, distant suggestions, or atmosphere. Do not depict ${goal.target} directly.`;
+  }
+  return `You may include ${goal.target} naturally in the scene if the clicked direction supports it; otherwise hint strongly toward the theme "${goal.theme}".`;
 }
 
 function extractResponseText(data: OpenAIResponse): string {
@@ -346,12 +535,20 @@ async function analyzeClickTarget({
   sourceImageUrl,
   pitch,
   yaw,
+  goal,
 }: {
   worldPrompt: string;
   sourceImageUrl: string;
   pitch: number;
   yaw: number;
-}): Promise<{ targetLabel: string; transitionSummary: string; destinationPrompt: string }> {
+  goal: Goal | null;
+}): Promise<{
+  targetLabel: string;
+  transitionSummary: string;
+  destinationPrompt: string;
+  goalVisible: boolean;
+  goalEvidence: string;
+}> {
   const response = await fetch(OPENAI_RESPONSES_URL, {
     method: "POST",
     headers: {
@@ -364,7 +561,7 @@ async function analyzeClickTarget({
         {
           role: "user",
           content: [
-            { type: "input_text", text: buildVisionInstruction(worldPrompt, pitch, yaw) },
+            { type: "input_text", text: buildVisionInstruction(worldPrompt, pitch, yaw, goal) },
             { type: "input_image", image_url: sourceImageUrl, detail: "low" },
           ],
         },
@@ -385,8 +582,10 @@ async function analyzeClickTarget({
   if (!destinationPrompt) {
     throw new Error("Vision response did not include a destination prompt");
   }
+  const goalEvidence = parsed.goal_evidence?.trim() || "";
+  const goalVisible = parsed.goal_visible === true && goalEvidence.length >= 12;
 
-  return { targetLabel, transitionSummary, destinationPrompt };
+  return { targetLabel, transitionSummary, destinationPrompt, goalVisible, goalEvidence };
 }
 
 async function generateImage(prompt: string): Promise<string> {
@@ -439,6 +638,7 @@ async function nodePayload(world: World, nodeId: string, cacheHit: boolean): Pro
     cacheHit,
     promptUsed: node.prompt,
     target: node.target,
+    goal: world.goal ?? null,
   };
 }
 
@@ -448,7 +648,11 @@ async function getOrCreateOrigin(world: World): Promise<NodePayload> {
     return nodePayload(world, ORIGIN_NODE_ID, true);
   }
 
-  const prompt = buildOriginPrompt(world.prompt);
+  if (!world.goal) {
+    const hint = world.prompt?.trim() || undefined;
+    world.goal = await generateGoal(hint);
+  }
+  const prompt = buildOriginPrompt(world.goal);
   const imageUrl = await generateImage(prompt);
   await putImage(imageKey(world.world_id, ORIGIN_NODE_ID), imageUrl);
   world.nodes[ORIGIN_NODE_ID] = {
@@ -465,14 +669,16 @@ async function getOrCreateOrigin(world: World): Promise<NodePayload> {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export async function startWorld(prompt: string): Promise<NodePayload> {
-  const worldPrompt = prompt.trim() || DEFAULT_PROMPT;
-  const worldId = worldIdFromPrompt(worldPrompt);
+  const userHint = prompt.trim();
+  const worldId = userHint
+    ? worldIdFromPrompt(userHint)
+    : worldIdFromPrompt(`game:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`);
   const worlds = await readWorlds();
-  const existingWorld = worlds.find((world) => world.world_id === worldId);
+  const existingWorld = userHint ? worlds.find((world) => world.world_id === worldId) : undefined;
   const world: World = existingWorld ?? {
     world_id: worldId,
-    prompt: worldPrompt,
-    normalized_prompt: normalizePrompt(worldPrompt),
+    prompt: userHint,
+    normalized_prompt: normalizePrompt(userHint),
     created_at: new Date().toISOString(),
     grid: { movement: "free_click_graph" },
     nodes: {},
@@ -516,19 +722,35 @@ export async function enterTarget({
 
   const quantizedPitch = quantizeAngle(pitch);
   const quantizedYaw = quantizeAngle(yaw);
+  const goalSnapshot = world.goal ?? null;
   onProgress?.("inspect");
   const analysis = await analyzeClickTarget({
     worldPrompt: world.prompt,
     sourceImageUrl,
     pitch,
     yaw,
+    goal: goalSnapshot,
   });
+
+  if (world.goal && !world.goal.won && analysis.goalVisible) {
+    world.goal = {
+      ...world.goal,
+      won: true,
+      wonAt: new Date().toISOString(),
+      wonEvidence: analysis.goalEvidence || `${world.goal.target} was visible in the previous view.`,
+    };
+  }
+
+  const driftSuffix = buildDriftSuffix(world.goal ?? null);
   const destinationPrompt = [
     analysis.destinationPrompt,
     `Transition: ${analysis.transitionSummary}`,
     `Clicked target: ${analysis.targetLabel}.`,
+    driftSuffix,
     "Generate a seamless full 360-degree equirectangular panorama, 2:1 aspect ratio, immersive street-view style environment, no text, no UI, no borders.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
   const nodeId = nodeIdFromEdge(world.world_id, edgeKey);
   onProgress?.("generate");
   const imageUrl = await generateImage(destinationPrompt);
@@ -546,6 +768,9 @@ export async function enterTarget({
     },
   };
   world.edges = { ...(world.edges ?? {}), [edgeKey]: nodeId };
+  if (world.goal) {
+    world.goal = { ...world.goal, moves: world.goal.moves + 1 };
+  }
   await putImage(imageKey(world.world_id, nodeId), imageUrl);
   await upsertWorld(world);
 
@@ -557,7 +782,24 @@ export async function enterTarget({
     cacheHit: false,
     promptUsed: destinationPrompt,
     target: world.nodes[nodeId].target ?? null,
+    goal: world.goal ?? null,
   };
+}
+
+export async function markGoalFound(worldId: string): Promise<Goal> {
+  const world = await readWorld(worldId);
+  if (!world) throw new Error("World not found");
+  if (!world.goal) throw new Error("This world has no active goal");
+  if (!world.goal.won) {
+    world.goal = {
+      ...world.goal,
+      won: true,
+      wonAt: new Date().toISOString(),
+      wonEvidence: world.goal.wonEvidence || "Manually marked as found.",
+    };
+    await upsertWorld(world);
+  }
+  return world.goal;
 }
 
 export async function getWorldHistory(): Promise<WorldHistoryResponse> {
@@ -579,6 +821,11 @@ export async function getWorldHistory(): Promise<WorldHistoryResponse> {
         created_at: world.created_at,
         node_count: Object.keys(world.nodes).length,
         origin_image_url: originImage,
+        goal_origin: world.goal?.origin ?? null,
+        goal_target: world.goal?.target ?? null,
+        goal_theme: world.goal?.theme ?? null,
+        goal_moves: world.goal?.moves ?? null,
+        goal_won: world.goal?.won ?? null,
       };
     })
   );
