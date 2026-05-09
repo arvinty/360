@@ -508,17 +508,154 @@ button:disabled {
   z-index: 10;
 }
 
-.move-map-list {
-  display: grid;
+.map-graph-wrap {
+  max-height: min(44vh, 360px);
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(8, 11, 16, 0.55);
+  padding: 8px;
+  touch-action: none;
+  cursor: grab;
+}
+
+.map-graph-wrap.dragging {
+  cursor: grabbing;
+}
+
+.map-graph-viewport {
+  position: relative;
+  width: 100%;
+  height: min(42vh, 340px);
+  overflow: hidden;
+}
+
+.map-graph-canvas {
+  position: relative;
+  min-width: max-content;
+  transform-origin: top left;
+  transition: transform 160ms ease-out;
+}
+
+.map-graph-wrap.dragging .map-graph-canvas {
+  transition: none;
+}
+
+.map-graph-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.map-graph-lines line {
+  stroke: rgba(154, 192, 255, 0.5);
+  stroke-width: 1.5;
+}
+
+.map-graph-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.graph-node-dot {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  padding: 0;
+  border-radius: 999px;
+  border: 2px solid rgba(195, 215, 247, 0.85);
+  background: rgba(18, 30, 47, 0.95);
+}
+
+.map-graph-node.active .graph-node-dot {
+  border-color: #9ac0ff;
+  background: #2f7be8;
+  box-shadow: 0 0 0 4px rgba(90, 167, 255, 0.2);
+}
+
+.graph-node-dot:hover:not(:disabled) {
+  transform: none;
+  box-shadow: 0 0 0 4px rgba(90, 167, 255, 0.2);
+}
+
+.graph-collapse {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  color: #dbe5f9;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+}
+
+.graph-collapse:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+  border-color: rgba(154, 192, 255, 0.55);
+  background: rgba(154, 192, 255, 0.16);
+}
+
+.graph-label {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  max-height: 220px;
-  overflow-y: auto;
-  padding-right: 2px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(11, 15, 21, 0.86);
+  max-width: 170px;
+}
+
+.graph-label .node-step {
+  min-width: auto;
+  font-size: 11px;
+  color: #b7c2d8;
+  flex-shrink: 0;
+}
+
+.graph-label .node-label {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.map-graph-node.active .graph-label {
+  border-color: rgba(154, 192, 255, 0.65);
+  background: rgba(23, 57, 78, 0.84);
+}
+
+.graph-reset {
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  font-weight: 600;
+  color: #dce5f7;
+}
+
+.graph-reset:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+  border-color: rgba(154, 192, 255, 0.6);
+  background: rgba(154, 192, 255, 0.16);
 }
 
 .move-map-node {
   --tree-branch: rgba(173, 191, 220, 0.35);
-  width: 100%;
+  flex: 1;
+  width: auto;
   min-height: 30px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(11, 15, 21, 0.82);

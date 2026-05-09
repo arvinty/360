@@ -38,8 +38,6 @@ export type Goal = {
   wonEvidence?: string;
 };
 
-export type GoalStage = "vague" | "stronger" | "reveal";
-
 export type NodePayload = {
   worldId: string;
   nodeId: string;
@@ -112,6 +110,7 @@ type World = {
   nodes: Record<string, WorldNode | LegacyWorldNode>;
   edges?: Record<string, string>;
   goal?: Goal;
+  recent_clicks?: Array<{ target: string; pitch: number; yaw: number; at: string }>;
 };
 
 type OpenAIImageResponse = {
@@ -345,7 +344,6 @@ function buildOriginPrompt(goal: Goal): string {
   return [
     `World description: ${goal.origin}`,
     "Generate the entry viewpoint for this world.",
-    `The player is secretly searching for: ${goal.target}. Do NOT include the target or its obvious parts in this opening view.`,
     "Generate a seamless full 360-degree equirectangular panorama, 2:1 aspect ratio, immersive street-view style environment, no text, no UI, no borders.",
   ].join("\n");
 }
@@ -355,38 +353,38 @@ type GoalSeed = Pick<Goal, "origin" | "target" | "theme" | "originShort" | "targ
 const GOAL_FALLBACKS: GoalSeed[] = [
   {
     origin: "an abandoned shopping mall, dim flickering fluorescent lights, dusty escalators",
-    target: "a blue grand piano",
-    theme: "music, melancholy, dust",
+    target: "a cracked storefront mannequin",
+    theme: "retail remains, dust, forgotten displays",
     originShort: "Abandoned Mall",
-    targetShort: "Blue Grand Piano",
+    targetShort: "Store Mannequin",
   },
   {
     origin: "a quiet snowy alpine village at dusk, warm lit windows, fresh snowfall",
-    target: "a vintage red telephone booth",
-    theme: "communication, nostalgia, isolation",
+    target: "a wooden sled by a doorway",
+    theme: "winter life, wood, quiet routines",
     originShort: "Snowy Alpine Village",
-    targetShort: "Red Telephone Booth",
+    targetShort: "Wooden Sled",
   },
   {
     origin: "a sprawling neon-lit night market in a futuristic city",
-    target: "a centuries-old jade dragon statue",
-    theme: "tradition meeting future, jade green, incense",
+    target: "a steaming noodle stall sign",
+    theme: "street food, steam, neon crowds",
     originShort: "Neon Night Market",
-    targetShort: "Jade Dragon Statue",
+    targetShort: "Noodle Stall Sign",
   },
   {
     origin: "an overgrown botanical garden inside a derelict glasshouse",
-    target: "an astronaut helmet on a pedestal",
-    theme: "exploration, oxygen, distant stars",
+    target: "a rusted watering can",
+    theme: "gardening, moisture, reclaimed growth",
     originShort: "Overgrown Glasshouse",
-    targetShort: "Astronaut Helmet",
+    targetShort: "Watering Can",
   },
   {
     origin: "a coastal lighthouse and its keeper's cottage on a stormy night",
-    target: "a hot air balloon basket",
-    theme: "flight, ropes, woven baskets, sky",
+    target: "a coiled mooring rope",
+    theme: "seafaring, rope, weathered wood",
     originShort: "Coastal Lighthouse",
-    targetShort: "Hot Air Balloon",
+    targetShort: "Mooring Rope",
   },
 ];
 
@@ -438,15 +436,15 @@ function buildGoalGenerationInstruction(userPromptHint?: string): string {
     lines.push(
       `User description of the world: "${trimmedHint}".`,
       "You MUST base the ORIGIN environment on this user description (faithfully expand it into an evocative, visually rich place, building, or environment).",
-      "Pick a TARGET that is a specific, visually distinctive object, person, or landmark that does NOT naturally belong in that origin.",
-      "Pick a THEME: 3-8 words of hidden steering vocabulary that semantically links the origin toward the target (mood, materials, motifs)."
+      "Pick a TARGET that is a specific, visually distinctive object that naturally appears in this origin and is reasonably discoverable by exploration.",
+      "Pick a THEME: 3-8 words of scene vocabulary that naturally co-occurs with both origin and target (materials, mood, activity)."
     );
   } else {
     lines.push(
       "No user description provided. Invent something fresh and surprising.",
       "Pick an ORIGIN that is evocative and visually rich (a place, building, or environment).",
-      "Pick a TARGET that is a specific, visually distinctive object, person, or landmark that does NOT naturally belong in the origin.",
-      "Pick a THEME: 3-8 words of hidden steering vocabulary that semantically links the origin toward the target (mood, materials, motifs)."
+      "Pick a TARGET that is a specific, visually distinctive object that naturally belongs in that origin and can plausibly be found.",
+      "Pick a THEME: 3-8 words of scene vocabulary that naturally connects origin and target (materials, mood, activity)."
     );
   }
   lines.push(
@@ -511,13 +509,187 @@ async function generateGoal(userPromptHint?: string): Promise<Goal> {
   }
 }
 
-const GOAL_VAGUE_MAX_MOVES = 2;
-const GOAL_STRONGER_MAX_MOVES = 5;
+type DirectiveCategory =
+  | "threshold"
+  | "reflectionInversion"
+  | "altitudeDrift"
+  | "materialPassage"
+  | "microToMacro"
+  | "insideOut"
+  | "narrativeLeap"
+  | "scaleShift";
 
-function goalStage(moves: number): GoalStage {
-  if (moves <= GOAL_VAGUE_MAX_MOVES) return "vague";
-  if (moves <= GOAL_STRONGER_MAX_MOVES) return "stronger";
-  return "reveal";
+type DirectiveRule = {
+  category: DirectiveCategory;
+  cues: RegExp[];
+  instruction: string;
+  examples: string[];
+  baseWeight: number;
+};
+
+const DIRECTIVE_RULES: DirectiveRule[] = [
+  {
+    category: "threshold",
+    cues: [/door|gate|arch|window|portal|entrance|hall|corridor|alley/i],
+    instruction:
+      "Treat the click as a traversable threshold: cross into an adjacent semantic space that still echoes local materials/colors.",
+    examples: [
+      "door -> move into shop interior, courtyard, backstage, or impossible annex",
+      "window -> slip into outside street, interior reflection, or weather pocket",
+    ],
+    baseWeight: 1.1,
+  },
+  {
+    category: "reflectionInversion",
+    cues: [/mirror|reflection|glass|chrome|water surface|screen/i],
+    instruction:
+      "Invert or fold perspective through reflective geometry; preserve recognizable motifs while bending orientation and physics.",
+    examples: [
+      "mirror -> reflected counterpart world with swapped lighting and gravity cues",
+      "screen -> enter synthetic/meta version of scene",
+    ],
+    baseWeight: 1.2,
+  },
+  {
+    category: "altitudeDrift",
+    cues: [/sky|cloud|sun|moon|star|bird|airplane|roof|tower/i],
+    instruction:
+      "Progressively increase vertical drift when upward/sky-like clicks repeat: atmosphere can escalate toward orbital/space-like views.",
+    examples: [
+      "sky clicks chain: clouds -> stratosphere -> orbital edge -> deep space fragments",
+      "roofline click -> rise into crane-level, then skyline, then aerial surreal",
+    ],
+    baseWeight: 1.05,
+  },
+  {
+    category: "materialPassage",
+    cues: [/wall|brick|tile|carpet|fabric|wood|metal|stone|texture/i],
+    instruction:
+      "Treat the clicked material as a passage medium; unfold microscopic texture patterns into navigable architecture.",
+    examples: [
+      "wood grain -> canyon-like striations and rings as pathways",
+      "tile pattern -> geometric district with repeating motifs",
+    ],
+    baseWeight: 0.95,
+  },
+  {
+    category: "microToMacro",
+    cues: [/object|statue|cup|lamp|book|plant|toy|sign|handle|knob/i],
+    instruction:
+      "Expand object-scale details into world-scale spaces while preserving object identity as environmental structure.",
+    examples: [
+      "lamp -> city of glowing filaments and warm haze avenues",
+      "book spine -> canyon corridor of stacked narrative layers",
+    ],
+    baseWeight: 0.9,
+  },
+  {
+    category: "insideOut",
+    cues: [/room|house|shop|store|building|vehicle|train|ship|cabin/i],
+    instruction:
+      "Flip interior/exterior semantics creatively: inside can become outside shell, outside can reveal nested interiors.",
+    examples: [
+      "shopfront -> interior market folds into exterior neon maze",
+      "vehicle body -> cabin transitions into moving landscape membrane",
+    ],
+    baseWeight: 0.9,
+  },
+  {
+    category: "narrativeLeap",
+    cues: [/painting|poster|photo|billboard|mural|symbol|icon|text/i],
+    instruction:
+      "Allow thematic narrative leaps when representational media is clicked; keep one anchor from the prior scene for continuity.",
+    examples: [
+      "poster -> enter depicted world but preserve prior color temperature",
+      "mural -> mythic variant of current district",
+    ],
+    baseWeight: 0.85,
+  },
+  {
+    category: "scaleShift",
+    cues: [/stairs|ladder|elevator|bridge|tunnel|path|road|track/i],
+    instruction:
+      "Use connective structures as scale shifters: step into altered proportions or spatial compression/expansion.",
+    examples: [
+      "stairs -> descend into giant-world underlayers or miniature internal shafts",
+      "bridge -> stretch into impossible long-form transit scene",
+    ],
+    baseWeight: 0.92,
+  },
+];
+
+function countRepeatedRecentTargets(
+  recentClicks: NonNullable<World["recent_clicks"]> | undefined,
+  targetLabel: string
+): number {
+  if (!recentClicks?.length || !targetLabel) return 0;
+  const normalized = targetLabel.toLowerCase().trim();
+  return recentClicks
+    .slice(-4)
+    .filter((entry) => entry.target.toLowerCase().trim() === normalized).length;
+}
+
+function weightedPick<T>(items: Array<{ item: T; weight: number }>): T | null {
+  const positive = items.filter((entry) => entry.weight > 0);
+  if (!positive.length) return null;
+  const total = positive.reduce((sum, entry) => sum + entry.weight, 0);
+  let cursor = Math.random() * total;
+  for (const entry of positive) {
+    cursor -= entry.weight;
+    if (cursor <= 0) return entry.item;
+  }
+  return positive[positive.length - 1].item;
+}
+
+function buildDynamicDirectiveSuffix({
+  targetLabel,
+  transitionSummary,
+  pitch,
+  recentClicks,
+  goal,
+}: {
+  targetLabel: string;
+  transitionSummary: string;
+  pitch: number;
+  recentClicks?: NonNullable<World["recent_clicks"]>;
+  goal: Goal | null;
+}): string {
+  const repeatedTargetCount = countRepeatedRecentTargets(recentClicks, targetLabel);
+  const upwardBias = pitch > 28 ? 0.32 : 0;
+  const downwardBias = pitch < -28 ? 0.18 : 0;
+  const whimsyBudget = clamp(0.45 + repeatedTargetCount * 0.24 + upwardBias + downwardBias, 0.35, 1.6);
+  const searchableText = `${targetLabel} ${transitionSummary}`.trim();
+
+  const weighted = DIRECTIVE_RULES.map((rule) => {
+    const cueHits = rule.cues.reduce((sum, cue) => sum + (cue.test(searchableText) ? 1 : 0), 0);
+    const cueWeight = cueHits * 0.38;
+    const repeatBoost =
+      rule.category === "altitudeDrift" && pitch > 28 ? repeatedTargetCount * 0.2 : repeatedTargetCount * 0.07;
+    return {
+      item: rule,
+      weight: rule.baseWeight + cueWeight + repeatBoost,
+    };
+  });
+
+  const primary = weightedPick(weighted) ?? DIRECTIVE_RULES[0];
+  const modifierCandidates = weighted
+    .filter((entry) => entry.item.category !== primary.category)
+    .map((entry) => ({
+      item: entry.item,
+      weight: entry.weight * (0.22 + whimsyBudget * 0.25),
+    }));
+  const modifier = weightedPick(modifierCandidates);
+  const chosenExamples = [...primary.examples, ...(modifier ? modifier.examples.slice(0, 1) : [])].slice(0, 2);
+
+  const lines = [
+    "Dynamic transition directives (broad, click-driven, whimsical):",
+    `- Primary directive: ${primary.instruction}`,
+    modifier ? `- Modifier directive: ${modifier.instruction}` : "",
+    `- Whimsy budget: ${whimsyBudget.toFixed(2)} (higher allows stronger surreal leaps while keeping at least one continuity anchor).`,
+    "- Keep click semantics central: what was clicked should feel causally responsible for the next scene.",
+    ...chosenExamples.map((example) => `- Example: ${example}`),
+  ];
+  return lines.filter(Boolean).join("\n");
 }
 
 function buildVisionInstruction(
@@ -539,27 +711,21 @@ function buildVisionInstruction(
     base.push(
       "Return only valid JSON with these keys:",
       `{"target_label":"short noun phrase","transition_summary":"one sentence","destination_prompt":"detailed prompt for a seamless 360-degree equirectangular panorama destination"}`,
-      "The destination prompt must preserve the source world's style when useful, but it may enter impossible spaces such as a painting's world.",
+      "The destination prompt should keep one continuity anchor from image 1, but it may take whimsical leaps based on the clicked semantic target from image 2.",
+      "Few-shot style anchors (adapt, do not copy literally): mirror -> reflected counterpart world; door/window -> threshold crossing; repeated sky/upward clicks -> altitude escalation toward space; texture/object click -> micro detail expands into macro environment.",
       "Base destination_prompt primarily on image 2 (the crop), using image 1 for continuity."
     );
     return base.join("\n");
   }
 
-  const stage = goalStage(goal.moves);
   base.push(
     "",
     "This is also a hidden goal-finding game.",
-    `World origin: ${goal.origin}.`,
-    `The player is secretly searching for: ${goal.target}.`,
-    `Hidden steering theme: ${goal.theme}.`,
-    `Current move count (this click is move ${goal.moves + 1}). Stage: ${stage}.`,
-    "",
-    "Drift policy:",
-    `  - vague (moves 0-${GOAL_VAGUE_MAX_MOVES}):     do NOT depict ${goal.target} or its parts. Only optional vague mood from the theme.`,
-    `  - stronger (moves ${GOAL_VAGUE_MAX_MOVES + 1}-${GOAL_STRONGER_MAX_MOVES}):  add subtle environmental hints related to the theme. Still no explicit target.`,
-    `  - reveal (moves ${GOAL_STRONGER_MAX_MOVES + 1}+):     if the clicked direction reasonably supports it, you MAY include ${goal.target} naturally. Do not force it; preserve dreamlike free exploration.`,
+    `Current move count (informational): ${goal.moves + 1}.`,
+    "No stage-gating: allow whimsical exploration at any move.",
     "",
     "Continue the 360 world in the direction indicated by image 2 (the crop). Use that crop as the main local continuation signal. Do not turn the world into a maze toward the target.",
+    "Few-shot style anchors (adapt, do not copy literally): mirror -> reflected counterpart world; door/window -> threshold crossing; repeated sky/upward clicks -> altitude escalation toward space; texture/object click -> micro detail expands into macro environment.",
     "",
     `STRICT WIN CHECK: using image 1 (the full panorama only), decide if ${goal.target} is unmistakably present.`,
     `Set "goal_visible" to true ONLY IF ALL of the following hold:`,
@@ -573,22 +739,10 @@ function buildVisionInstruction(
     "Return ONLY valid JSON with these keys:",
     `{"target_label":"short noun phrase","transition_summary":"one sentence","destination_prompt":"detailed prompt for a seamless 360-degree equirectangular panorama destination","goal_visible":true|false,"goal_evidence":"concrete phrase if true, empty string if false"}`,
     "The destination prompt must preserve the source world's style when useful, but it may enter impossible spaces such as a painting's world.",
-    "The destination prompt must respect the drift policy for the current stage."
+    "The destination prompt should be click-semantic first, with whimsical freedom."
   );
 
   return base.join("\n");
-}
-
-function buildDriftSuffix(goal: Goal | null): string {
-  if (!goal) return "";
-  const stage = goalStage(goal.moves);
-  if (stage === "vague") {
-    return `Do NOT include ${goal.target} or its obvious parts. Maintain a coherent continuation of the current world's style.`;
-  }
-  if (stage === "stronger") {
-    return `Subtly hint at the theme "${goal.theme}" through lighting, props, distant suggestions, or atmosphere. Do not depict ${goal.target} directly.`;
-  }
-  return `You may include ${goal.target} naturally in the scene if the clicked direction supports it; otherwise hint strongly toward the theme "${goal.theme}".`;
 }
 
 function extractResponseText(data: OpenAIResponse): string {
@@ -724,12 +878,14 @@ async function analyzeClickTargetWithCrop({
   pitch,
   yaw,
   goal,
+  signal,
 }: {
   worldPrompt: string;
   sourceImageUrl: string;
   pitch: number;
   yaw: number;
   goal: Goal | null;
+  signal?: AbortSignal;
 }): Promise<{
   targetLabel: string;
   transitionSummary: string;
@@ -741,6 +897,7 @@ async function analyzeClickTargetWithCrop({
   const targetCropUrl = await cropClickTargetImage({ sourceImageUrl, pitch, yaw });
   const response = await fetch(OPENAI_RESPONSES_URL, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${getApiKey()}`,
@@ -819,13 +976,18 @@ async function generateImageFromReferences({
   prompt,
   sourceImageUrl,
   targetCropUrl,
+  quality = "low",
+  signal,
 }: {
   prompt: string;
   sourceImageUrl: string;
   targetCropUrl: string;
+  quality?: "low" | "medium";
+  signal?: AbortSignal;
 }): Promise<string> {
   const response = await fetch(OPENAI_IMAGE_EDITS_URL, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${getApiKey()}`,
@@ -836,7 +998,7 @@ async function generateImageFromReferences({
       prompt,
       n: 1,
       size: "1536x1024",
-      quality: "medium",
+      quality,
       output_format: "png"
     }),
   });
@@ -941,6 +1103,7 @@ export async function enterTarget({
   pitch,
   yaw,
   onProgress,
+  signal,
 }: {
   worldId: string;
   parentNodeId: string;
@@ -948,6 +1111,7 @@ export async function enterTarget({
   pitch: number;
   yaw: number;
   onProgress?: (status: "inspect" | "generate") => void;
+  signal?: AbortSignal;
 }): Promise<NodePayload> {
   const world = await readWorld(worldId);
   if (!world) throw new Error("World not found");
@@ -970,6 +1134,7 @@ export async function enterTarget({
     pitch,
     yaw,
     goal: goalSnapshot,
+    signal,
   });
   const { targetLabel, targetCropUrl, transitionSummary } = vision;
 
@@ -983,12 +1148,18 @@ export async function enterTarget({
     };
   }
 
-  const driftSuffix = buildDriftSuffix(world.goal ?? null);
+  const dynamicDirectiveSuffix = buildDynamicDirectiveSuffix({
+    targetLabel: vision.targetLabel,
+    transitionSummary: vision.transitionSummary,
+    pitch,
+    recentClicks: world.recent_clicks,
+    goal: world.goal ?? null,
+  });
   const destinationPrompt = [
     vision.destinationPrompt,
     `Transition: ${vision.transitionSummary}`,
     `Clicked target: ${vision.targetLabel}.`,
-    driftSuffix,
+    dynamicDirectiveSuffix,
     "Generate a seamless full 360-degree equirectangular panorama, 2:1 aspect ratio, immersive street-view style environment, no text, no UI, no borders.",
   ]
     .filter(Boolean)
@@ -999,6 +1170,8 @@ export async function enterTarget({
     prompt: destinationPrompt,
     sourceImageUrl,
     targetCropUrl,
+    quality: "low",
+    signal,
   });
 
   world.nodes[nodeId] = {
@@ -1017,6 +1190,15 @@ export async function enterTarget({
   if (world.goal) {
     world.goal = { ...world.goal, moves: world.goal.moves + 1 };
   }
+  world.recent_clicks = [
+    ...(world.recent_clicks ?? []).slice(-7),
+    {
+      target: targetLabel,
+      pitch,
+      yaw,
+      at: new Date().toISOString(),
+    },
+  ];
   await putImage(imageKey(world.world_id, nodeId), imageUrl);
   await upsertWorld(world);
 

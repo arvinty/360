@@ -1,4 +1,4 @@
-import { type PointerEvent, useEffect, useRef, useState } from "react";
+import { type PointerEvent, type WheelEvent, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_PROMPT,
   enterTarget,
@@ -62,6 +62,15 @@ type TreeRenderRow = {
   node: MoveTreeNode;
   hasSiblingPath: boolean[];
   branchType: "root" | "tee" | "elbow";
+  hasChildren: boolean;
+  isCollapsed: boolean;
+  parentVisibleIndex: number | null;
+};
+
+type GraphView = {
+  scale: number;
+  x: number;
+  y: number;
 };
 
 function formatCreatedAt(value: string): string {
@@ -88,7 +97,7 @@ function goalDisplayTarget(goal: Goal): string {
   return goal.targetShort || goal.target;
 }
 
-function buildTreeRows(nodes: MoveTreeNode[]): TreeRenderRow[] {
+function buildTreeRows(nodes: MoveTreeNode[], collapsedNodeIds: Set<string>): TreeRenderRow[] {
   if (!nodes.length) return [];
   const byParent = new Map<string, MoveTreeNode[]>();
   const allIds = new Set(nodes.map((node) => node.node_id));
@@ -109,12 +118,26 @@ function buildTreeRows(nodes: MoveTreeNode[]): TreeRenderRow[] {
 
   const rows: TreeRenderRow[] = [];
   const visited = new Set<string>();
+  const visibleIndexByNodeId = new Map<string, number>();
 
   function walk(node: MoveTreeNode, guides: boolean[], branchType: TreeRenderRow["branchType"]) {
     if (visited.has(node.node_id)) return;
     visited.add(node.node_id);
-    rows.push({ node, hasSiblingPath: guides, branchType });
     const children = byParent.get(node.node_id) ?? [];
+    const isCollapsed = collapsedNodeIds.has(node.node_id);
+    const parentVisibleIndex = node.parent_node_id
+      ? (visibleIndexByNodeId.get(node.parent_node_id) ?? null)
+      : null;
+    rows.push({
+      node,
+      hasSiblingPath: guides,
+      branchType,
+      hasChildren: children.length > 0,
+      isCollapsed,
+      parentVisibleIndex,
+    });
+    visibleIndexByNodeId.set(node.node_id, rows.length - 1);
+    if (isCollapsed) return;
     children.forEach((child, index) => {
       const hasNextSibling = index < children.length - 1;
       walk(child, [...guides, hasNextSibling], hasNextSibling ? "tee" : "elbow");
@@ -152,10 +175,22 @@ export default function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const [busyStatus, setBusyStatus] = useState<string | null>(null);
+  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set());
+  const [graphView, setGraphView] = useState<GraphView>({ scale: 1, x: 0, y: 0 });
+  const [graphDragging, setGraphDragging] = useState(false);
   const [viewerPanDragging, setViewerPanDragging] = useState(false);
   /** True once this pointer session moved past the click threshold (pan / look drag). */
   const panGripRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
+  const graphPanRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
+  const transitionRequestIdRef = useRef(0);
+  const transitionAbortRef = useRef<AbortController | null>(null);
   const toastSeqRef = useRef(0);
   const isDev = import.meta.env.DEV;
 
@@ -206,7 +241,6 @@ export default function App() {
   async function startWorld(promptOverride?: string) {
     setBusy(true);
     setBusyStatus("Starting world…");
-    pushToast("Starting world and generating origin + goal…");
     setWinDismissed(false);
     try {
       const data = await startWorldRequest(promptOverride ?? prompt);
@@ -256,7 +290,6 @@ export default function App() {
     setBusyStatus("Opening world…");
     setWinDismissed(false);
     setDrawerOpen(false);
-    pushToast("Opening world…");
     try {
       const data = await getWorldNode(worldId);
       renderPanorama(data);
@@ -276,9 +309,18 @@ export default function App() {
       return;
     }
 
+    transitionAbortRef.current?.abort();
+    const controller = new AbortController();
+    transitionAbortRef.current = controller;
+    transitionRequestIdRef.current += 1;
+    const requestId = transitionRequestIdRef.current;
+
+    const startedAt = performance.now();
+    let inspectEndedAt = startedAt;
+    let generateStarted = false;
+
     setBusy(true);
     setBusyStatus("Inspecting target…");
-    pushToast("Inspecting target…");
     try {
       const data = await enterTarget({
         worldId: worldState.worldId,
@@ -286,29 +328,50 @@ export default function App() {
         sourceImageUrl: activeNode.imageUrl,
         pitch,
         yaw,
+        signal: controller.signal,
         onProgress: (progress) => {
+          if (progress === "generate" && !generateStarted) {
+            inspectEndedAt = performance.now();
+            generateStarted = true;
+          }
           setBusyStatus(progress === "inspect" ? "Inspecting target…" : "Generating next view…");
-          pushToast(progress === "inspect" ? "Inspecting target…" : "Generating next view…");
         },
       });
+      if (requestId !== transitionRequestIdRef.current) return;
+
+      const totalMs = Math.max(0, performance.now() - startedAt);
+      const inspectMs = Math.max(0, inspectEndedAt - startedAt);
+      const generateMs = Math.max(0, totalMs - inspectMs);
+
       renderPanorama(data);
       if (data.goal?.won) {
         const moves = data.goal.moves;
         pushToast(
-          `You found ${goalDisplayTarget(data.goal)} in ${moves} move${moves === 1 ? "" : "s"}!`
+          `You found ${goalDisplayTarget(data.goal)} in ${moves} move${moves === 1 ? "" : "s"}! (${(totalMs / 1000).toFixed(1)}s)`
         );
       } else if (data.target?.targetLabel) {
-        pushToast(`Entered ${data.target.targetLabel}.`);
+        pushToast(
+          `Entered ${data.target.targetLabel}. ${(totalMs / 1000).toFixed(1)}s total (inspect ${(inspectMs / 1000).toFixed(1)}s, generate ${(generateMs / 1000).toFixed(1)}s).`
+        );
       } else {
-        pushToast("Entered the clicked target.");
+        pushToast(
+          `Entered the clicked target. ${(totalMs / 1000).toFixed(1)}s total (inspect ${(inspectMs / 1000).toFixed(1)}s, generate ${(generateMs / 1000).toFixed(1)}s).`
+        );
       }
-      await loadMoveTree(data.worldId);
-      await loadHistory();
+      void loadMoveTree(data.worldId);
+      void loadHistory();
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
       pushToast(`Error: ${getErrorMessage(error)}`, "error");
     } finally {
+      if (requestId !== transitionRequestIdRef.current) return;
       setBusyStatus(null);
       setBusy(false);
+      if (transitionAbortRef.current === controller) {
+        transitionAbortRef.current = null;
+      }
     }
   }
 
@@ -320,7 +383,6 @@ export default function App() {
 
     setBusy(true);
     setBusyStatus("Reloading current scene…");
-    pushToast("Reloading current node…");
     try {
       const data = await getWorldNode(worldState.worldId, worldState.nodeId);
       renderPanorama(data);
@@ -339,9 +401,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      transitionAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!worldState.worldId) return;
     void loadMoveTree(worldState.worldId);
   }, [worldState.worldId]);
+
+  useEffect(() => {
+    setCollapsedNodeIds((current) => {
+      if (!current.size) return current;
+      const validIds = new Set(moveTree.map((node) => node.node_id));
+      const next = new Set<string>();
+      current.forEach((id) => {
+        if (validIds.has(id)) next.add(id);
+      });
+      return next.size === current.size ? current : next;
+    });
+  }, [moveTree]);
 
   useEffect(() => {
     if (drawerOpen) void loadHistory();
@@ -487,7 +567,6 @@ export default function App() {
     if (!worldState.worldId || !nodeId) return;
     setBusy(true);
     setBusyStatus("Jumping to selected scene…");
-    pushToast("Jumping to selected scene…");
     try {
       const data = await getWorldNode(worldState.worldId, nodeId);
       renderPanorama(data);
@@ -506,12 +585,82 @@ export default function App() {
     return "Scene";
   }
 
+  function toggleBranch(nodeId: string) {
+    setCollapsedNodeIds((current) => {
+      const next = new Set(current);
+      if (next.has(nodeId)) {
+        next.delete(nodeId);
+      } else {
+        next.add(nodeId);
+      }
+      return next;
+    });
+  }
+
+  function shouldIgnoreGraphPanTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest("button, a, textarea, input, select"));
+  }
+
+  function clampScale(value: number): number {
+    return Math.max(0.6, Math.min(2.4, value));
+  }
+
+  function handleGraphWheel(event: WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const factor = event.deltaY > 0 ? 0.92 : 1.08;
+    setGraphView((current) => ({ ...current, scale: clampScale(current.scale * factor) }));
+  }
+
+  function handleGraphPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || shouldIgnoreGraphPanTarget(event.target)) return;
+    graphPanRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: graphView.x,
+      originY: graphView.y,
+    };
+    setGraphDragging(true);
+  }
+
+  function handleGraphPointerMove(event: PointerEvent<HTMLDivElement>) {
+    const panState = graphPanRef.current;
+    if (!panState || event.pointerId !== panState.pointerId) return;
+    const dx = event.clientX - panState.startX;
+    const dy = event.clientY - panState.startY;
+    setGraphView((current) => ({ ...current, x: panState.originX + dx, y: panState.originY + dy }));
+  }
+
+  function handleGraphPointerUp(event: PointerEvent<HTMLDivElement>) {
+    const panState = graphPanRef.current;
+    if (!panState || event.pointerId !== panState.pointerId) return;
+    graphPanRef.current = null;
+    setGraphDragging(false);
+  }
+
   const hasWorld = Boolean(worldState.worldId);
   const targetShort = goal ? goalDisplayTarget(goal) : "";
   const currentSceneLabel =
     activeNode?.target?.targetLabel || goal?.originShort || goal?.origin || "Start";
   const sessionStatusText = busyStatus || `Current scene: ${currentSceneLabel}`;
-  const treeRows = buildTreeRows(moveTree);
+  const treeRows = buildTreeRows(moveTree, collapsedNodeIds);
+  const graphStepX = 64;
+  const graphStepY = 46;
+  const graphPaddingX = 24;
+  const graphPaddingY = 24;
+  const graphRows = treeRows.map((row, index) => ({
+    ...row,
+    visibleIndex: index,
+    x: graphPaddingX + row.hasSiblingPath.length * graphStepX,
+    y: graphPaddingY + index * graphStepY,
+  }));
+  const graphWidth = Math.max(
+    300,
+    ...graphRows.map((row) => row.x + 180),
+    graphPaddingX * 2 + 200
+  );
+  const graphHeight = Math.max(220, graphPaddingY * 2 + graphRows.length * graphStepY);
 
   return (
     <div className="app-shell">
@@ -633,8 +782,23 @@ export default function App() {
           <aside className="session-map-panel" aria-label="Session move map">
             <div className="session-map-head">
               <h3 className="move-map-title">Move Map</h3>
+              <button
+                type="button"
+                className="graph-reset"
+                onClick={() => setGraphView({ scale: 1, x: 0, y: 0 })}
+                disabled={busy}
+              >
+                Reset
+              </button>
             </div>
-            <div className="move-map-list">
+            <div
+              className={`map-graph-wrap ${graphDragging ? "dragging" : ""}`}
+              onWheel={handleGraphWheel}
+              onPointerDown={handleGraphPointerDown}
+              onPointerMove={handleGraphPointerMove}
+              onPointerUp={handleGraphPointerUp}
+              onPointerCancel={handleGraphPointerUp}
+            >
               {moveTreeLoading && <div className="placeholder">Loading move map…</div>}
               {!moveTreeLoading && moveTreeError && (
                 <div className="placeholder">Failed to load move map: {moveTreeError}</div>
@@ -644,33 +808,73 @@ export default function App() {
               )}
               {!moveTreeLoading &&
                 !moveTreeError &&
-                treeRows.map((row) => (
-                  <button
-                    type="button"
-                    key={row.node.node_id}
-                    className={`move-map-node ${
-                      row.node.node_id === worldState.nodeId ? "active" : ""
-                    }`}
-                    onClick={() => openWorldNode(row.node.node_id)}
-                    disabled={busy}
-                    title={formatCreatedAt(row.node.created_at)}
-                  >
-                    <span className="tree-guides" aria-hidden="true">
-                      {row.hasSiblingPath.map((hasSibling, index) => (
-                        <span
-                          // eslint-disable-next-line react/no-array-index-key
-                          key={`${row.node.node_id}-g-${index}`}
-                          className={`tree-guide ${hasSibling ? "line" : "empty"}`}
+                graphRows.length > 0 && (
+                  <div className="map-graph-viewport">
+                    <div
+                      className="map-graph-canvas"
+                      style={{
+                        width: graphWidth,
+                        height: graphHeight,
+                        transform: `translate(${graphView.x}px, ${graphView.y}px) scale(${graphView.scale})`,
+                      }}
+                    >
+                    <svg
+                      className="map-graph-lines"
+                      viewBox={`0 0 ${graphWidth} ${graphHeight}`}
+                      aria-hidden="true"
+                    >
+                      {graphRows.map((row) => {
+                        if (row.parentVisibleIndex === null) return null;
+                        const parent = graphRows[row.parentVisibleIndex];
+                        if (!parent) return null;
+                        return (
+                          <line
+                            key={`${row.node.node_id}-line`}
+                            x1={parent.x}
+                            y1={parent.y}
+                            x2={row.x}
+                            y2={row.y}
+                          />
+                        );
+                      })}
+                    </svg>
+                    {graphRows.map((row) => (
+                      <div
+                        className={`map-graph-node ${
+                          row.node.node_id === worldState.nodeId ? "active" : ""
+                        }`}
+                        key={row.node.node_id}
+                        style={{ left: row.x, top: row.y }}
+                      >
+                        <button
+                          type="button"
+                          className="graph-node-dot"
+                          onClick={() => openWorldNode(row.node.node_id)}
+                          disabled={busy}
+                          title={formatCreatedAt(row.node.created_at)}
+                          aria-label={`Go to step ${row.node.step}: ${moveNodeLabel(row.node)}`}
                         />
-                      ))}
-                      {row.branchType !== "root" && (
-                        <span className={`tree-branch ${row.branchType}`} />
-                      )}
-                    </span>
-                    <span className="node-step">#{row.node.step}</span>
-                    <span className="node-label">{moveNodeLabel(row.node)}</span>
-                  </button>
-                ))}
+                        {row.hasChildren && (
+                          <button
+                            type="button"
+                            className={`graph-collapse ${row.isCollapsed ? "collapsed" : ""}`}
+                            onClick={() => toggleBranch(row.node.node_id)}
+                            disabled={busy}
+                            aria-label={row.isCollapsed ? "Expand branch" : "Collapse branch"}
+                            aria-expanded={!row.isCollapsed}
+                          >
+                            {row.isCollapsed ? "+" : "−"}
+                          </button>
+                        )}
+                        <div className="graph-label">
+                          <span className="node-step">#{row.node.step}</span>
+                          <span className="node-label">{moveNodeLabel(row.node)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  </div>
+                )}
             </div>
           </aside>
         )}
