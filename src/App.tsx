@@ -8,14 +8,31 @@ import {
   getWorldNode,
   type HiddenTarget,
   type HiddenTargetCheckResult,
+  type NodeEntry,
   type NodePayload,
   startWorld as startWorldRequest,
   type WorldSummary,
 } from "./mockApi";
 
+type PannellumHotSpot = {
+  id?: string;
+  pitch: number;
+  yaw: number;
+  type?: "custom";
+  cssClass?: string;
+  createTooltipFunc?: (element: HTMLElement, args: unknown) => void;
+  createTooltipArgs?: unknown;
+  clickHandlerFunc?: (event: MouseEvent, args: unknown) => void;
+  clickHandlerArgs?: unknown;
+};
+
 type PannellumViewer = {
   destroy: () => void;
   mouseEventToCoords: (event: MouseEvent) => [number, number];
+  addHotSpot: (hotSpot: PannellumHotSpot) => void;
+  removeHotSpot: (hotSpotId: string) => void;
+  getPitch: () => number;
+  getYaw: () => number;
 };
 
 declare global {
@@ -32,6 +49,7 @@ declare global {
           pitch: number;
           yaw: number;
           hfov: number;
+          hotSpots?: PannellumHotSpot[];
         }
       ) => PannellumViewer;
     };
@@ -88,6 +106,12 @@ export default function App() {
   const [objectiveSession, setObjectiveSession] = useState<ObjectiveSession | null>(null);
   const [objectiveLoading, setObjectiveLoading] = useState(false);
   const [objectiveError, setObjectiveError] = useState("");
+  const [loadingHotspot, setLoadingHotspot] = useState<{
+    id: string;
+    pitch: number;
+    yaw: number;
+  } | null>(null);
+  const viewOrientationRef = useRef({ pitch: 0, yaw: 0 });
   /** True once this pointer session moved past the click threshold (pan / look drag). */
   const panGripRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
@@ -123,6 +147,7 @@ export default function App() {
     } catch (error) {
       setStatus(`Error: ${getErrorMessage(error)}`);
     } finally {
+      setLoadingHotspot(null);
       setBusy(false);
     }
   }
@@ -143,12 +168,33 @@ export default function App() {
     }
   }
 
+  async function openNode(worldId: string, nodeId: string, label?: string) {
+    rememberCurrentOrientation();
+    setBusy(true);
+    setStatus(label ? `Opening ${label}...` : "Opening saved entry...");
+    try {
+      const data = await getWorldNode(worldId, nodeId);
+      renderPanorama(data);
+      setStatus(label ? `Entered ${label}.` : "Saved entry loaded.");
+    } catch (error) {
+      setStatus(`Error: ${getErrorMessage(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function goBackToParent() {
+    if (!worldState.worldId || !activeNode?.parentNodeId) return;
+    await openNode(worldState.worldId, activeNode.parentNodeId, "previous view");
+  }
+
   async function enterClickedTarget(pitch: number, yaw: number) {
     if (!worldState.worldId || !worldState.nodeId || !activeNode) {
       setStatus("Start or open a world first.");
       return;
     }
 
+    rememberCurrentOrientation();
     setBusy(true);
     setStatus("Inspecting target...");
     try {
@@ -272,15 +318,43 @@ export default function App() {
       return undefined;
     }
 
+    const entryHotSpots: PannellumHotSpot[] = activeNode.entries.map((entry) => ({
+      id: `entry-${entry.nodeId}`,
+      pitch: entry.pitch,
+      yaw: entry.yaw,
+      type: "custom",
+      cssClass: "entry-hotspot",
+      createTooltipFunc: (element, args) => {
+        const hotspotEntry = args as NodeEntry;
+        element.setAttribute("aria-label", hotspotEntry.targetLabel);
+        const marker = document.createElement("span");
+        marker.className = "entry-hotspot-marker";
+        marker.tabIndex = 0;
+        const label = document.createElement("span");
+        label.className = "entry-hotspot-label";
+        label.textContent = hotspotEntry.targetLabel;
+        marker.appendChild(label);
+        element.appendChild(marker);
+      },
+      createTooltipArgs: entry,
+      clickHandlerFunc: (event, args) => {
+        event.stopPropagation();
+        const hotspotEntry = args as NodeEntry;
+        void openNode(activeNode.worldId, hotspotEntry.nodeId, hotspotEntry.targetLabel);
+      },
+      clickHandlerArgs: entry,
+    }));
+
     viewerRef.current = window.pannellum.viewer("panorama", {
       type: "equirectangular",
       panorama: activeNode.imageUrl,
       autoLoad: true,
       showZoomCtrl: true,
       showFullscreenCtrl: true,
-      pitch: 0,
-      yaw: 0,
+      pitch: viewOrientationRef.current.pitch,
+      yaw: viewOrientationRef.current.yaw,
       hfov: 100,
+      hotSpots: entryHotSpots,
     });
 
     return () => {
@@ -290,6 +364,39 @@ export default function App() {
       }
     };
   }, [activeNode]);
+
+  function rememberCurrentOrientation() {
+    if (!viewerRef.current) return;
+    viewOrientationRef.current = {
+      pitch: viewerRef.current.getPitch(),
+      yaw: viewerRef.current.getYaw(),
+    };
+  }
+
+  useEffect(() => {
+    if (!viewerRef.current || !loadingHotspot) return undefined;
+
+    viewerRef.current.addHotSpot({
+      id: loadingHotspot.id,
+      pitch: loadingHotspot.pitch,
+      yaw: loadingHotspot.yaw,
+      type: "custom",
+      cssClass: "loading-hotspot",
+      createTooltipFunc: (element) => {
+        const spinner = document.createElement("span");
+        spinner.className = "loading-hotspot-spinner";
+        element.appendChild(spinner);
+      },
+    });
+
+    return () => {
+      try {
+        viewerRef.current?.removeHotSpot(loadingHotspot.id);
+      } catch {
+        // Pannellum may already have destroyed the hotspot with the viewer.
+      }
+    };
+  }, [loadingHotspot]);
 
   useEffect(() => {
     if (busy || !worldState.worldId) {
@@ -301,7 +408,9 @@ export default function App() {
   function shouldIgnorePointerTarget(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return false;
     return Boolean(
-      target.closest("button, a, textarea, input, select, .pnlm-controls, .pnlm-load-button")
+      target.closest(
+        "button, a, textarea, input, select, .pnlm-controls, .pnlm-load-button, .entry-hotspot, .loading-hotspot"
+      )
     );
   }
 
@@ -356,6 +465,11 @@ export default function App() {
       bubbles: true,
     });
     const [pitch, yaw] = viewerRef.current.mouseEventToCoords(mouseEvent);
+    setLoadingHotspot({
+      id: `loading-${window.crypto.randomUUID()}`,
+      pitch,
+      yaw,
+    });
     void enterClickedTarget(pitch, yaw);
   }
 
@@ -494,6 +608,11 @@ export default function App() {
           >
             <div id="panorama" className={!worldState.worldId ? "empty" : ""} />
             {!worldState.worldId && <div className="empty-message">Start or open a world.</div>}
+            {activeNode?.parentNodeId && (
+              <button className="viewer-back-button" disabled={busy} onClick={goBackToParent}>
+                Back
+              </button>
+            )}
           </div>
 
           <div className="hud">
