@@ -1,9 +1,13 @@
 import { type PointerEvent, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_PROMPT,
+  checkHiddenTargetSatisfied,
   enterTarget,
+  generateHiddenTarget,
   getWorldHistory,
   getWorldNode,
+  type HiddenTarget,
+  type HiddenTargetCheckResult,
   type NodePayload,
   startWorld as startWorldRequest,
   type WorldSummary,
@@ -44,6 +48,13 @@ type PointerStart = {
   pointerId: number;
 };
 
+type ObjectiveSession = {
+  target: HiddenTarget;
+  solved: boolean;
+  generatedFor: { worldId: string; nodeId: string };
+  lastCheck: HiddenTargetCheckResult | null;
+};
+
 function formatCreatedAt(value: string): string {
   if (!value) return "unknown time";
   const date = new Date(value);
@@ -74,6 +85,9 @@ export default function App() {
   const [targetState, setTargetState] = useState("-");
   const [activeNode, setActiveNode] = useState<NodePayload | null>(null);
   const [viewerPanDragging, setViewerPanDragging] = useState(false);
+  const [objectiveSession, setObjectiveSession] = useState<ObjectiveSession | null>(null);
+  const [objectiveLoading, setObjectiveLoading] = useState(false);
+  const [objectiveError, setObjectiveError] = useState("");
   /** True once this pointer session moved past the click threshold (pan / look drag). */
   const panGripRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
@@ -178,6 +192,66 @@ export default function App() {
       setStatus(`Error: ${getErrorMessage(error)}`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function generateObjective() {
+    if (!activeNode || !worldState.worldId || !worldState.nodeId) {
+      setObjectiveError("Start or open a world first.");
+      return;
+    }
+    setObjectiveLoading(true);
+    setObjectiveError("");
+    try {
+      const target = await generateHiddenTarget({
+        worldPrompt: prompt,
+        currentContext: activeNode.contextDescription || activeNode.promptUsed || prompt,
+        currentLocation: activeNode.contextLocation || prompt,
+      });
+      setObjectiveSession({
+        target,
+        solved: false,
+        generatedFor: { worldId: worldState.worldId, nodeId: worldState.nodeId },
+        lastCheck: null,
+      });
+    } catch (error) {
+      setObjectiveError(getErrorMessage(error));
+    } finally {
+      setObjectiveLoading(false);
+    }
+  }
+
+  async function checkObjective() {
+    if (!objectiveSession) {
+      setObjectiveError("Generate a hidden target first.");
+      return;
+    }
+    if (!activeNode) {
+      setObjectiveError("Start or open a world first.");
+      return;
+    }
+    setObjectiveLoading(true);
+    setObjectiveError("");
+    try {
+      const result = await checkHiddenTargetSatisfied({
+        hiddenTarget: objectiveSession.target,
+        sourceImageUrl: activeNode.imageUrl,
+        currentContext: activeNode.contextDescription || activeNode.promptUsed || prompt,
+        currentLocation: activeNode.contextLocation || prompt,
+      });
+      setObjectiveSession((previous) =>
+        previous
+          ? {
+              ...previous,
+              solved: previous.solved || result.matched,
+              lastCheck: result,
+            }
+          : previous
+      );
+    } catch (error) {
+      setObjectiveError(getErrorMessage(error));
+    } finally {
+      setObjectiveLoading(false);
     }
   }
 
@@ -307,6 +381,58 @@ export default function App() {
           </section>
 
           <div className="status">{status}</div>
+
+          <section>
+            <div className="history-head">
+              <h2 className="section-title">Objective</h2>
+              <button
+                className="secondary compact"
+                disabled={busy || objectiveLoading || !worldState.worldId}
+                onClick={generateObjective}
+              >
+                {objectiveSession ? "New Target" : "Generate Hidden Target"}
+              </button>
+            </div>
+            {!objectiveSession && (
+              <div className="placeholder">
+                Generate a hidden target for this session. It stays separate from world generation.
+              </div>
+            )}
+            {objectiveSession && (
+              <div className="objective-card">
+                <div>
+                  <strong>Target:</strong> {objectiveSession.target.objectiveLabel}
+                </div>
+                <div>
+                  <strong>Clue:</strong> {objectiveSession.target.clue}
+                </div>
+                <div className="meta">
+                  <span>{objectiveSession.solved ? "Solved" : "Unsolved"}</span>
+                  <span>
+                    Generated at node {objectiveSession.generatedFor.nodeId}
+                  </span>
+                </div>
+                {objectiveSession.lastCheck && (
+                  <div className="objective-check-result">
+                    Last check:{" "}
+                    {objectiveSession.lastCheck.matched ? "match" : "no match"} (
+                    {objectiveSession.lastCheck.confidence}) - {objectiveSession.lastCheck.reason}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="button-row">
+              <button
+                className="secondary"
+                disabled={busy || objectiveLoading || !objectiveSession || !worldState.worldId}
+                onClick={checkObjective}
+              >
+                Check Target
+              </button>
+            </div>
+            {objectiveLoading && <div className="placeholder">Objective request in progress...</div>}
+            {!!objectiveError && <div className="placeholder">Objective error: {objectiveError}</div>}
+          </section>
 
           <section>
             <div className="history-head">

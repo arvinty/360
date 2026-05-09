@@ -188,6 +188,29 @@ button:disabled {
   font-size: 12px;
 }
 
+.objective-card {
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #d7deec;
+  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.objective-card .meta {
+  display: flex;
+  gap: 12px;
+  color: #bdc7d8;
+  font-size: 12px;
+}
+
+.objective-check-result {
+  color: #d5dce9;
+  font-size: 13px;
+}
+
 .history-thumb {
   width: 100%;
   aspect-ratio: 2 / 1;

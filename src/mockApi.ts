@@ -33,7 +33,21 @@ export type NodePayload = {
   imageUrl: string;
   cacheHit: boolean;
   promptUsed: string;
+  contextDescription: string;
+  contextLocation: string;
   target: TargetMetadata | null;
+};
+
+export type HiddenTarget = {
+  objectiveLabel: string;
+  clue: string;
+  acceptanceCriteria: string;
+};
+
+export type HiddenTargetCheckResult = {
+  matched: boolean;
+  confidence: "low" | "medium" | "high";
+  reason: string;
 };
 
 export type WorldSummary = {
@@ -388,6 +402,108 @@ function buildChildLocation(currentLocation: string, targetLabel: string): strin
   return compactLocation(`inside or beyond ${targetLabel}, within ${parentLocation}`);
 }
 
+function buildHiddenTargetInstruction({
+  worldPrompt,
+  currentContext,
+  currentLocation,
+}: {
+  worldPrompt: string;
+  currentContext: string;
+  currentLocation: string;
+}): string {
+  return [
+    "Generate a hidden objective for an exploratory 360 panorama game.",
+    `World theme: ${compactDescription(worldPrompt)}`,
+    `Current view: ${compactDescription(currentContext)}`,
+    `Current location: ${compactLocation(currentLocation)}`,
+    "The objective must be semantically reachable by exploring this world in a few steps.",
+    "The objective must be visually identifiable from an image.",
+    "Return strict JSON only with keys: objectiveLabel, clue, acceptanceCriteria.",
+    "objectiveLabel must be 3-10 words.",
+    "clue must be a short hint and must not repeat objectiveLabel verbatim.",
+    "acceptanceCriteria must describe what evidence should count as a match.",
+  ].join("\n");
+}
+
+function buildTargetSatisfactionInstruction({
+  hiddenTarget,
+  currentContext,
+  currentLocation,
+}: {
+  hiddenTarget: HiddenTarget;
+  currentContext: string;
+  currentLocation: string;
+}): string {
+  return [
+    "You are validating whether a panorama image satisfies a hidden objective.",
+    `Objective label: ${hiddenTarget.objectiveLabel}`,
+    `Clue: ${hiddenTarget.clue}`,
+    `Acceptance criteria: ${hiddenTarget.acceptanceCriteria}`,
+    `Current context: ${compactDescription(currentContext)}`,
+    `Current location: ${compactLocation(currentLocation)}`,
+    "Evaluate the attached panorama image.",
+    "Return strict JSON only with keys: matched, confidence, reason.",
+    "matched must be boolean.",
+    "confidence must be one of: low, medium, high.",
+    "reason must be a concise explanation under 140 characters.",
+  ].join("\n");
+}
+
+function extractJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return "";
+  return text.slice(start, end + 1);
+}
+
+function parseHiddenTarget(rawText: string): HiddenTarget {
+  const normalizedText = rawText.trim();
+  const jsonText = extractJsonObject(normalizedText) || normalizedText;
+  const parsed = JSON.parse(jsonText) as Partial<HiddenTarget>;
+  const objectiveLabel = String(parsed.objectiveLabel ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 80);
+  const clue = String(parsed.clue ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 180);
+  const acceptanceCriteria = String(parsed.acceptanceCriteria ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 220);
+  if (!objectiveLabel) {
+    throw new Error("Hidden target generation returned an empty objective");
+  }
+  return {
+    objectiveLabel,
+    clue: clue || "Look for a visually distinct object or area tied to the world theme.",
+    acceptanceCriteria:
+      acceptanceCriteria || "The image should clearly depict the objective or a direct visual equivalent.",
+  };
+}
+
+function parseHiddenTargetCheckResult(rawText: string): HiddenTargetCheckResult {
+  const normalizedText = rawText.trim();
+  const jsonText = extractJsonObject(normalizedText) || normalizedText;
+  const parsed = JSON.parse(jsonText) as Partial<HiddenTargetCheckResult>;
+  const matched = Boolean(parsed.matched);
+  const confidenceRaw = String(parsed.confidence ?? "low").trim().toLowerCase();
+  const confidence: HiddenTargetCheckResult["confidence"] =
+    confidenceRaw === "high" || confidenceRaw === "medium" || confidenceRaw === "low"
+      ? confidenceRaw
+      : "low";
+  const reason = String(parsed.reason ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 160);
+  return {
+    matched,
+    confidence,
+    reason: reason || (matched ? "Scene appears to satisfy the objective." : "Scene does not yet satisfy the objective."),
+  };
+}
+
 function extractResponseText(data: OpenAIResponse): string {
   if (data.output_text) return data.output_text;
   const text = data.output
@@ -641,6 +757,8 @@ async function nodePayload(world: World, nodeId: string, cacheHit: boolean): Pro
     imageUrl,
     cacheHit,
     promptUsed: node.prompt,
+    contextDescription: node.description,
+    contextLocation: node.location,
     target: node.target,
   };
 }
@@ -775,8 +893,91 @@ export async function enterTarget({
     imageUrl,
     cacheHit: false,
     promptUsed: destination.prompt,
+    contextDescription: destination.description,
+    contextLocation: destination.location,
     target: world.nodes[nodeId].target ?? null,
   };
+}
+
+export async function generateHiddenTarget({
+  worldPrompt,
+  currentContext,
+  currentLocation,
+}: {
+  worldPrompt: string;
+  currentContext: string;
+  currentLocation: string;
+}): Promise<HiddenTarget> {
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getApiKey()}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_VISION_MODEL,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: buildHiddenTargetInstruction({ worldPrompt, currentContext, currentLocation }),
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  const data = (await response.json().catch(() => ({}))) as OpenAIResponse;
+  if (!response.ok) {
+    throw new Error(data.error?.message || "OpenAI hidden target generation failed");
+  }
+  const text = extractResponseText(data);
+  return parseHiddenTarget(text);
+}
+
+export async function checkHiddenTargetSatisfied({
+  hiddenTarget,
+  sourceImageUrl,
+  currentContext,
+  currentLocation,
+}: {
+  hiddenTarget: HiddenTarget;
+  sourceImageUrl: string;
+  currentContext: string;
+  currentLocation: string;
+}): Promise<HiddenTargetCheckResult> {
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getApiKey()}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_VISION_MODEL,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: buildTargetSatisfactionInstruction({ hiddenTarget, currentContext, currentLocation }),
+            },
+            { type: "input_image", image_url: sourceImageUrl, detail: "low" },
+          ],
+        },
+      ],
+    }),
+  });
+
+  const data = (await response.json().catch(() => ({}))) as OpenAIResponse;
+  if (!response.ok) {
+    throw new Error(data.error?.message || "OpenAI hidden target verification failed");
+  }
+  const text = extractResponseText(data);
+  return parseHiddenTargetCheckResult(text);
 }
 
 export async function getWorldHistory(): Promise<WorldHistoryResponse> {
