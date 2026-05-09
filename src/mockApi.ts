@@ -1,5 +1,6 @@
 const STORAGE_KEY = "grid-360-worlds";
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations";
+const OPENAI_IMAGE_EDITS_URL = "https://api.openai.com/v1/images/edits";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_IMAGE_MODEL = "gpt-image-2";
 const OPENAI_VISION_MODEL = "gpt-4.1-mini";
@@ -86,6 +87,11 @@ type OpenAIResponse = {
     content?: Array<{ text?: string; type?: string }>;
   }>;
   error?: { message?: string };
+};
+
+type ClickAnalysis = {
+  targetLabel: string;
+  targetCropUrl: string;
 };
 
 // ── IndexedDB image store ──────────────────────────────────────────────────
@@ -205,6 +211,14 @@ function quantizeAngle(value: number): number {
   return Math.round(value / CLICK_QUANTUM_DEGREES) * CLICK_QUANTUM_DEGREES;
 }
 
+function clickEdgeKey(parentNodeId: string, pitch: number, yaw: number): string {
+  return `${parentNodeId}@${quantizeAngle(pitch)},${quantizeAngle(yaw)}`;
+}
+
+function nodeIdFromEdge(worldId: string, edgeKey: string): string {
+  return hashText(`${worldId}:${edgeKey}`);
+}
+
 function promptPreview(prompt: string): string {
   return prompt.length > 120 ? `${prompt.slice(0, 117)}...` : prompt;
 }
@@ -296,13 +310,40 @@ function buildOriginPrompt(worldPrompt: string): string {
 
 function buildVisionInstruction(worldPrompt: string, pitch: number, yaw: number): string {
   return [
-    "You are labeling what a user clicked in a 360 panorama.",
+    "Label the object or area at the center of the attached crop.",
     `World description: ${worldPrompt}`,
-    `The user clicked the current panorama at pitch ${pitch.toFixed(1)} degrees and yaw ${yaw.toFixed(1)} degrees.`,
-    "The attached image is a small crop around the clicked area.",
-    "Return only a single concise label for what the user is looking at or pointing at.",
-    "Do not return JSON, punctuation, explanations, or multiple alternatives.",
-    "Use a short noun phrase such as: window, framed painting, bed pillow, desk lamp, wooden door.",
+    `Click location in the source panorama: pitch ${pitch.toFixed(1)}, yaw ${yaw.toFixed(1)}.`,
+    "Return exactly one short noun phrase.",
+    "Do not return JSON, punctuation, explanations, full sentences, or alternatives.",
+    "Examples: window, framed painting, bed pillow, desk lamp, wooden door.",
+  ].join("\n");
+}
+
+function buildDestinationPrompt({
+  worldPrompt,
+  currentPrompt,
+  targetLabel,
+  pitch,
+  yaw,
+}: {
+  worldPrompt: string;
+  currentPrompt: string;
+  targetLabel: string;
+  pitch: number;
+  yaw: number;
+}): string {
+  return [
+    `World description: ${worldPrompt}`,
+    `Current view context: ${currentPrompt}`,
+    `The user clicked on: ${targetLabel}.`,
+    `Click location in the previous panorama: pitch ${pitch.toFixed(1)}, yaw ${yaw.toFixed(1)}.`,
+    "Reference images provided: the full current panorama and a small crop centered on the clicked target.",
+    `Generate the next immersive viewpoint as if the camera moved into or through the ${targetLabel}.`,
+    "Preserve visual continuity with the previous panorama: same overall art direction, lighting temperature, material quality, camera height, lens feel, and environmental mood.",
+    "Use the clicked crop as the strongest local reference for color, texture, object identity, and transition direction.",
+    "If the clicked target is a portal-like object such as a window, doorway, mirror, screen, poster, or painting, place the camera just beyond or inside that target's implied space.",
+    "If the clicked target is an ordinary object or surface, move close enough that the new 360 view plausibly explores the object's immediate surrounding micro-environment.",
+    "Generate a seamless full 360-degree equirectangular panorama, 2:1 aspect ratio, immersive street-view style environment, no text, no UI, no borders.",
   ].join("\n");
 }
 
@@ -423,7 +464,7 @@ async function cropClickTargetImage({
   return canvas.toDataURL("image/png");
 }
 
-async function analyzeClickTarget({
+async function analyzeClickTargetWithCrop({
   worldPrompt,
   sourceImageUrl,
   pitch,
@@ -433,7 +474,7 @@ async function analyzeClickTarget({
   sourceImageUrl: string;
   pitch: number;
   yaw: number;
-}): Promise<string> {
+}): Promise<ClickAnalysis> {
   const targetCropUrl = await cropClickTargetImage({ sourceImageUrl, pitch, yaw });
   const response = await fetch(OPENAI_RESPONSES_URL, {
     method: "POST",
@@ -460,11 +501,14 @@ async function analyzeClickTarget({
     throw new Error(data.error?.message || "OpenAI target analysis failed");
   }
 
-  return extractResponseText(data)
-    .replace(/^["'`]+|["'`.]+$/g, "")
-    .split("\n")[0]
-    .trim()
-    .slice(0, 80) || "clicked target";
+  const targetLabel =
+    extractResponseText(data)
+      .replace(/^["'`]+|["'`.]+$/g, "")
+      .split("\n")[0]
+      .trim()
+      .slice(0, 80) || "clicked target";
+
+  return { targetLabel, targetCropUrl };
 }
 
 async function generateImage(prompt: string): Promise<string> {
@@ -487,6 +531,43 @@ async function generateImage(prompt: string): Promise<string> {
   const data = (await response.json().catch(() => ({}))) as OpenAIImageResponse;
   if (!response.ok) {
     throw new Error(data.error?.message || "OpenAI image generation failed");
+  }
+
+  const image = data.data?.[0];
+  if (image?.b64_json) return `data:image/png;base64,${image.b64_json}`;
+  if (image?.url) return image.url;
+  throw new Error("OpenAI response did not include an image");
+}
+
+async function generateImageFromReferences({
+  prompt,
+  sourceImageUrl,
+  targetCropUrl,
+}: {
+  prompt: string;
+  sourceImageUrl: string;
+  targetCropUrl: string;
+}): Promise<string> {
+  const response = await fetch(OPENAI_IMAGE_EDITS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getApiKey()}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_IMAGE_MODEL,
+      images: [{ image_url: sourceImageUrl }, { image_url: targetCropUrl }],
+      prompt,
+      n: 1,
+      size: "1536x1024",
+      quality: "medium",
+      output_format: "png"
+    }),
+  });
+
+  const data = (await response.json().catch(() => ({}))) as OpenAIImageResponse;
+  if (!response.ok) {
+    throw new Error(data.error?.message || "OpenAI referenced image generation failed");
   }
 
   const image = data.data?.[0];
@@ -581,36 +662,68 @@ export async function enterTarget({
   sourceImageUrl: string;
   pitch: number;
   yaw: number;
-  onProgress?: (status: "inspect") => void;
+  onProgress?: (status: "inspect" | "generate") => void;
 }): Promise<NodePayload> {
   const world = await readWorld(worldId);
   if (!world) throw new Error("World not found");
 
+  const edgeKey = clickEdgeKey(parentNodeId, pitch, yaw);
+  const existingNodeId = world.edges?.[edgeKey];
+  if (existingNodeId && isGraphNode(world.nodes[existingNodeId])) {
+    return nodePayload(world, existingNodeId, true);
+  }
+
+  const currentNode = world.nodes[parentNodeId];
+  if (!isGraphNode(currentNode)) throw new Error("Current node not found");
+
   const quantizedPitch = quantizeAngle(pitch);
   const quantizedYaw = quantizeAngle(yaw);
   onProgress?.("inspect");
-  const targetLabel = await analyzeClickTarget({
+  const { targetLabel, targetCropUrl } = await analyzeClickTargetWithCrop({
     worldPrompt: world.prompt,
     sourceImageUrl,
     pitch,
     yaw,
   });
-  const currentNode = world.nodes[parentNodeId];
-  if (!isGraphNode(currentNode)) throw new Error("Current node not found");
+  const destinationPrompt = buildDestinationPrompt({
+    worldPrompt: world.prompt,
+    currentPrompt: currentNode.prompt,
+    targetLabel,
+    pitch,
+    yaw,
+  });
+  const nodeId = nodeIdFromEdge(world.world_id, edgeKey);
+  onProgress?.("generate");
+  const imageUrl = await generateImageFromReferences({
+    prompt: destinationPrompt,
+    sourceImageUrl,
+    targetCropUrl,
+  });
 
-  return {
-    worldId: world.world_id,
-    nodeId: parentNodeId,
-    parentNodeId: currentNode.parent_id,
-    imageUrl: sourceImageUrl,
-    cacheHit: true,
-    promptUsed: currentNode.prompt,
+  world.nodes[nodeId] = {
+    id: nodeId,
+    parent_id: parentNodeId,
+    prompt: destinationPrompt,
+    created_at: new Date().toISOString(),
     target: {
       targetLabel,
-      transitionSummary: `Looking at ${targetLabel}.`,
+      transitionSummary: `Entered ${targetLabel}.`,
       quantizedPitch,
       quantizedYaw,
     },
+  };
+  world.edges = { ...(world.edges ?? {}), [edgeKey]: nodeId };
+  await putImage(imageKey(world.world_id, nodeId), imageUrl);
+  await upsertWorld(world);
+
+  return {
+    worldId: world.world_id,
+    nodeId,
+    parentNodeId,
+    imageUrl,
+    cacheHit: false,
+    promptUsed: destinationPrompt,
+    target: world.nodes[nodeId].target ?? null,
   };
 }
 

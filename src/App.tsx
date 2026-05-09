@@ -144,15 +144,15 @@ export default function App() {
         sourceImageUrl: activeNode.imageUrl,
         pitch,
         yaw,
-        onProgress: () => {
-          setStatus("Inspecting target...");
+        onProgress: (progress) => {
+          setStatus(progress === "inspect" ? "Inspecting target..." : "Generating next view...");
         },
       });
       renderPanorama(data);
       setStatus(
         data.target?.targetLabel
-          ? `Looking at ${data.target.targetLabel}.`
-          : "Identified the clicked target."
+          ? `Entered ${data.target.targetLabel}.`
+          : "Entered the clicked target."
       );
       await loadHistory();
     } catch (error) {
