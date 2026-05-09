@@ -1,9 +1,12 @@
 const STORAGE_KEY = "grid-360-worlds";
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations";
-const OPENAI_IMAGE_MODEL = "gpt-image-1.5";
+const OPENAI_IMAGE_MODEL = "gpt-image-2";
+const IMAGE_DB_NAME = "grid-360-images";
+const IMAGE_DB_STORE = "images";
+const IMAGE_DB_VERSION = 1;
 
 export const DEFAULT_PROMPT =
-  "A high-quality 360 equirectangular panorama of a cozy mountain lake at sunset, wide horizontal composition, immersive environment, photorealistic.";
+  "A high-quality 360 equirectangular image of a cozy college dorm room. Photorealistic.";
 
 export type Direction = "north" | "south" | "east" | "west";
 
@@ -35,10 +38,10 @@ export type WorldHistoryResponse = {
   worlds: WorldSummary[];
 };
 
+// imageUrl is intentionally absent — images live in IndexedDB, not localStorage
 type WorldNode = {
   x: number;
   y: number;
-  imageUrl: string;
   prompt: string;
   created_at: string;
   last_move: Direction | null;
@@ -65,8 +68,52 @@ type OpenAIImageResponse = {
   error?: { message?: string };
 };
 
+// ── IndexedDB image store ──────────────────────────────────────────────────
+
+let _db: IDBDatabase | null = null;
+
+function openImageDB(): Promise<IDBDatabase> {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IMAGE_DB_NAME, IMAGE_DB_VERSION);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(IMAGE_DB_STORE);
+    };
+    req.onsuccess = () => {
+      _db = req.result;
+      resolve(_db);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getImage(key: string): Promise<string | null> {
+  const db = await openImageDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(IMAGE_DB_STORE, "readonly").objectStore(IMAGE_DB_STORE).get(key);
+    req.onsuccess = () => resolve((req.result as string | undefined) ?? null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function putImage(key: string, imageUrl: string): Promise<void> {
+  const db = await openImageDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMAGE_DB_STORE, "readwrite");
+    tx.objectStore(IMAGE_DB_STORE).put(imageUrl, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function imageKey(worldId: string, x: number, y: number): string {
+  return `${worldId}/${x},${y}`;
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+
 function getApiKey(): string {
-  const apiKey = import.meta.env.VITE_OPENAI_API_KEY || import.meta.env.OPENAI_API_KEY;
+  const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is missing from .env");
   }
@@ -122,6 +169,7 @@ function buildNodePrompt(
 }
 
 async function generateImage(prompt: string): Promise<string> {
+  console.log("[generateImage] requesting image, prompt length:", prompt.length);
   const response = await fetch(OPENAI_IMAGES_URL, {
     method: "POST",
     headers: {
@@ -138,12 +186,15 @@ async function generateImage(prompt: string): Promise<string> {
     }),
   });
 
+  console.log("[generateImage] response status:", response.status);
   const data = (await response.json().catch(() => ({}))) as OpenAIImageResponse;
   if (!response.ok) {
+    console.error("[generateImage] OpenAI error:", data.error);
     throw new Error(data.error?.message || "OpenAI image generation failed");
   }
 
   const image = data.data?.[0];
+  console.log("[generateImage] image keys:", image ? Object.keys(image) : "none");
   if (image?.b64_json) return `data:image/png;base64,${image.b64_json}`;
   if (image?.url) return image.url;
   throw new Error("OpenAI response did not include an image");
@@ -161,6 +212,8 @@ function neighborsFor(x: number, y: number): Record<Direction, Coordinate> {
 function promptPreview(prompt: string): string {
   return prompt.length > 120 ? `${prompt.slice(0, 117)}...` : prompt;
 }
+
+// ── localStorage (metadata only, no images) ────────────────────────────────
 
 function isWorld(value: unknown): value is World {
   if (!value || typeof value !== "object") return false;
@@ -187,91 +240,6 @@ function writeWorlds(worlds: World[]): void {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(worlds));
 }
 
-function toWorldSummary(world: World): WorldSummary {
-  const origin = world.nodes[nodeKey(0, 0)];
-  return {
-    world_id: world.world_id,
-    prompt: world.prompt,
-    prompt_preview: promptPreview(world.prompt),
-    created_at: world.created_at,
-    node_count: Object.keys(world.nodes).length,
-    origin_image_url: origin?.imageUrl ?? null,
-  };
-}
-
-function nodePayload(world: World, x: number, y: number, cacheHit: boolean): NodePayload {
-  const node = world.nodes[nodeKey(x, y)];
-  if (!node) {
-    throw new Error("Node not found");
-  }
-
-  return {
-    worldId: world.world_id,
-    x,
-    y,
-    imageUrl: node.imageUrl,
-    neighbors: neighborsFor(x, y),
-    cacheHit,
-    promptUsed: node.prompt,
-  };
-}
-
-function createNode(
-  world: World,
-  x: number,
-  y: number,
-  lastMove: Direction | null = null
-): { world: World; prompt: string; cachedPayload: NodePayload | null } {
-  const key = nodeKey(x, y);
-  if (world.nodes[key]) {
-    return {
-      world,
-      prompt: world.nodes[key].prompt,
-      cachedPayload: nodePayload(world, x, y, true),
-    };
-  }
-
-  const prompt = buildNodePrompt(world.prompt, x, y, lastMove);
-  return { world, prompt, cachedPayload: null };
-}
-
-function saveNode(
-  world: World,
-  x: number,
-  y: number,
-  lastMove: Direction | null,
-  prompt: string,
-  imageUrl: string
-): NodePayload {
-  const key = nodeKey(x, y);
-  const node: WorldNode = {
-    x,
-    y,
-    imageUrl,
-    prompt,
-    created_at: new Date().toISOString(),
-    last_move: lastMove,
-  };
-
-  world.nodes[key] = node;
-  return nodePayload(world, x, y, false);
-}
-
-async function getOrCreateNode(
-  world: World,
-  x: number,
-  y: number,
-  lastMove: Direction | null = null
-): Promise<NodePayload> {
-  const result = createNode(world, x, y, lastMove);
-  if (result.cachedPayload) return result.cachedPayload;
-
-  const imageUrl = await generateImage(result.prompt);
-  const payload = saveNode(world, x, y, lastMove, result.prompt, imageUrl);
-  upsertWorld(world);
-  return payload;
-}
-
 function upsertWorld(nextWorld: World): void {
   const worlds = readWorlds();
   const index = worlds.findIndex((world) => world.world_id === nextWorld.world_id);
@@ -283,24 +251,118 @@ function upsertWorld(nextWorld: World): void {
   writeWorlds(worlds);
 }
 
+// ── Node helpers ───────────────────────────────────────────────────────────
+
+async function getOrCreateNode(
+  world: World,
+  x: number,
+  y: number,
+  lastMove: Direction | null = null
+): Promise<NodePayload> {
+  const key = nodeKey(x, y);
+  const idbKey = imageKey(world.world_id, x, y);
+  const existingNode = world.nodes[key];
+
+  if (existingNode) {
+    const cachedImage = await getImage(idbKey);
+    if (cachedImage) {
+      console.log(`[getOrCreateNode] cache hit (${x},${y})`);
+      return {
+        worldId: world.world_id,
+        x,
+        y,
+        imageUrl: cachedImage,
+        neighbors: neighborsFor(x, y),
+        cacheHit: true,
+        promptUsed: existingNode.prompt,
+      };
+    }
+    // Metadata exists but image was lost from IndexedDB — regenerate
+    console.warn(`[getOrCreateNode] metadata exists for (${x},${y}) but image missing from IndexedDB, regenerating`);
+    const imageUrl = await generateImage(existingNode.prompt);
+    await putImage(idbKey, imageUrl);
+    return {
+      worldId: world.world_id,
+      x,
+      y,
+      imageUrl,
+      neighbors: neighborsFor(x, y),
+      cacheHit: false,
+      promptUsed: existingNode.prompt,
+    };
+  }
+
+  // New node
+  const prompt = buildNodePrompt(world.prompt, x, y, lastMove);
+  console.log(`[getOrCreateNode] generating new node (${x},${y}), lastMove:`, lastMove);
+  const imageUrl = await generateImage(prompt);
+  await putImage(idbKey, imageUrl);
+  console.log(`[getOrCreateNode] image saved to IndexedDB for (${x},${y})`);
+
+  world.nodes[key] = {
+    x,
+    y,
+    prompt,
+    created_at: new Date().toISOString(),
+    last_move: lastMove,
+  };
+  upsertWorld(world);
+
+  return {
+    worldId: world.world_id,
+    x,
+    y,
+    imageUrl,
+    neighbors: neighborsFor(x, y),
+    cacheHit: false,
+    promptUsed: prompt,
+  };
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
 export async function startWorld(prompt: string): Promise<NodePayload> {
   const worldPrompt = prompt.trim() || DEFAULT_PROMPT;
   const worldId = worldIdFromPrompt(worldPrompt);
+  console.log("[startWorld] prompt:", JSON.stringify(worldPrompt));
+  console.log("[startWorld] worldId:", worldId);
+
   const worlds = readWorlds();
+  console.log("[startWorld] worlds in storage:", worlds.length);
+
   const existingWorld = worlds.find((world) => world.world_id === worldId);
-  const world: World =
-    existingWorld ??
-    {
-      world_id: worldId,
-      prompt: worldPrompt,
-      normalized_prompt: normalizePrompt(worldPrompt),
-      created_at: new Date().toISOString(),
-      grid: { movement: "cardinal_4" },
-      nodes: {},
-    };
+  console.log(
+    "[startWorld] existingWorld:",
+    existingWorld
+      ? `found (${Object.keys(existingWorld.nodes).length} nodes)`
+      : "none — creating new"
+  );
+
+  const world: World = existingWorld ?? {
+    world_id: worldId,
+    prompt: worldPrompt,
+    normalized_prompt: normalizePrompt(worldPrompt),
+    created_at: new Date().toISOString(),
+    grid: { movement: "cardinal_4" },
+    nodes: {},
+  };
 
   upsertWorld(world);
-  return getOrCreateNode(world, 0, 0, null);
+  console.log("[startWorld] upserted world, fetching origin node (0,0)...");
+
+  try {
+    const payload = await getOrCreateNode(world, 0, 0, null);
+    console.log(
+      "[startWorld] origin node ready, cacheHit:",
+      payload.cacheHit,
+      "imageUrl length:",
+      payload.imageUrl.length
+    );
+    return payload;
+  } catch (err) {
+    console.error("[startWorld] failed to get/create origin node:", err);
+    throw err;
+  }
 }
 
 export async function getWorldNode(worldId: string, x = 0, y = 0): Promise<NodePayload> {
@@ -330,11 +392,25 @@ export async function moveWorld({
 }
 
 export async function getWorldHistory(): Promise<WorldHistoryResponse> {
-  const worlds = readWorlds()
-    .map(toWorldSummary)
-    .sort(
-      (left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
-    );
+  const worlds = readWorlds().sort(
+    (left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+  );
 
-  return { worlds };
+  const summaries = await Promise.all(
+    worlds.map(async (world): Promise<WorldSummary> => {
+      const originImage = world.nodes[nodeKey(0, 0)]
+        ? await getImage(imageKey(world.world_id, 0, 0))
+        : null;
+      return {
+        world_id: world.world_id,
+        prompt: world.prompt,
+        prompt_preview: promptPreview(world.prompt),
+        created_at: world.created_at,
+        node_count: Object.keys(world.nodes).length,
+        origin_image_url: originImage,
+      };
+    })
+  );
+
+  return { worlds: summaries };
 }

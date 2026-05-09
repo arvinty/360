@@ -204,7 +204,6 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <h1>Grid Street-View 360 Explorer</h1>
-        <p>Generate OpenAI panorama nodes and keep local browser history.</p>
       </header>
 
       <div className="layout">
