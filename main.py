@@ -118,14 +118,30 @@ def save_world(world: dict[str, Any]) -> None:
     )
 
 
-def generate_node_image(prompt: str) -> bytes:
+def generate_node_image(prompt: str, reference_image_path: Path | None = None) -> tuple[bytes, str]:
+    if reference_image_path is not None and reference_image_path.exists():
+        try:
+            with reference_image_path.open("rb") as reference_image:
+                result = client.images.edit(
+                    model="gpt-image-2",
+                    image=reference_image,
+                    prompt=prompt,
+                    size="1536x1024",
+                    input_fidelity="high",
+                )
+            image_base64 = result.data[0].b64_json
+            return base64.b64decode(image_base64), "edit"
+        except Exception:
+            # Fall back to text-only generation when image editing is unavailable.
+            pass
+
     result = client.images.generate(
         model="gpt-image-2",
         prompt=prompt,
         size="1536x1024",
     )
     image_base64 = result.data[0].b64_json
-    return base64.b64decode(image_base64)
+    return base64.b64decode(image_base64), "generate"
 
 
 def neighbors_for(x: int, y: int) -> dict[str, dict[str, int]]:
@@ -136,7 +152,12 @@ def neighbors_for(x: int, y: int) -> dict[str, dict[str, int]]:
 
 
 def get_or_create_node(
-    world: dict[str, Any], x: int, y: int, last_move: str | None
+    world: dict[str, Any],
+    x: int,
+    y: int,
+    last_move: str | None,
+    source_node_key: str | None = None,
+    source_filename: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     key = node_key(x, y)
     nodes = world["nodes"]
@@ -155,7 +176,14 @@ def get_or_create_node(
         }, True
 
     node_prompt = build_node_prompt(world["prompt"], x, y, last_move)
-    image_bytes = generate_node_image(node_prompt)
+    reference_path: Path | None = None
+    if source_filename:
+        _, images_dir, _ = world_paths(world["world_id"])
+        reference_path = images_dir / source_filename
+
+    image_bytes, generation_method = generate_node_image(
+        node_prompt, reference_image_path=reference_path
+    )
     filename = f"{x}_{y}.png"
     _, images_dir, _ = world_paths(world["world_id"])
     (images_dir / filename).write_bytes(image_bytes)
@@ -166,6 +194,9 @@ def get_or_create_node(
         "prompt": node_prompt,
         "created_at": utc_now_iso(),
         "last_move": last_move,
+        "source_node_key": source_node_key,
+        "source_filename": source_filename,
+        "generation_method": generation_method,
     }
     save_world(world)
     return {
@@ -184,6 +215,53 @@ def load_world_by_id(world_id: str) -> dict[str, Any] | None:
     if not metadata_path.exists():
         return None
     return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+def parse_iso_datetime(value: str | None) -> datetime:
+    if not value:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+
+
+def list_cached_worlds() -> list[dict[str, Any]]:
+    worlds: list[dict[str, Any]] = []
+    for world_dir in WORLD_CACHE_DIR.iterdir():
+        if not world_dir.is_dir():
+            continue
+        metadata_path = world_dir / "world.json"
+        if not metadata_path.exists():
+            continue
+        try:
+            world = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        world_id = str(world.get("world_id") or world_dir.name)
+        prompt = str(world.get("prompt") or "")
+        created_at = str(world.get("created_at") or "")
+        nodes = world.get("nodes") if isinstance(world.get("nodes"), dict) else {}
+        node_count = len(nodes)
+        origin_image_url = None
+        origin_file = world_dir / "images" / "0_0.png"
+        if origin_file.exists():
+            origin_image_url = url_for("world_image", world_id=world_id, filename="0_0.png")
+
+        worlds.append(
+            {
+                "world_id": world_id,
+                "prompt": prompt,
+                "prompt_preview": (prompt[:117] + "...") if len(prompt) > 120 else prompt,
+                "created_at": created_at,
+                "node_count": node_count,
+                "origin_image_url": origin_image_url,
+            }
+        )
+
+    worlds.sort(key=lambda item: parse_iso_datetime(item.get("created_at")), reverse=True)
+    return worlds
 
 
 @app.route("/")
@@ -242,8 +320,23 @@ def world_move():
     dx, dy = DIRECTION_DELTAS[direction]
     next_x = x + dx
     next_y = y + dy
-    node_payload, _ = get_or_create_node(world, next_x, next_y, direction)
+    source_key = node_key(x, y)
+    source_node = world["nodes"].get(source_key)
+    source_filename = source_node["filename"] if source_node else None
+    node_payload, _ = get_or_create_node(
+        world,
+        next_x,
+        next_y,
+        direction,
+        source_node_key=source_key if source_node else None,
+        source_filename=source_filename,
+    )
     return jsonify(node_payload)
+
+
+@app.route("/world/history")
+def world_history():
+    return jsonify({"worlds": list_cached_worlds()})
 
 
 @app.route("/world-cache/<world_id>/<path:filename>")
