@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { type PointerEvent, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_PROMPT,
-  type Direction,
+  enterTarget,
   getWorldHistory,
   getWorldNode,
-  moveWorld,
   type NodePayload,
   startWorld as startWorldRequest,
   type WorldSummary,
@@ -12,6 +11,7 @@ import {
 
 type PannellumViewer = {
   destroy: () => void;
+  mouseEventToCoords: (event: MouseEvent) => [number, number];
 };
 
 declare global {
@@ -34,12 +34,15 @@ declare global {
   }
 }
 
-const DIRECTIONS: Array<{ id: Direction; label: string; title: string }> = [
-  { id: "north", label: "↑", title: "Move North" },
-  { id: "west", label: "←", title: "Move West" },
-  { id: "east", label: "→", title: "Move East" },
-  { id: "south", label: "↓", title: "Move South" },
-];
+const CLICK_MOVE_THRESHOLD_PX = 6;
+const CLICK_TIME_THRESHOLD_MS = 350;
+
+type PointerStart = {
+  x: number;
+  y: number;
+  time: number;
+  pointerId: number;
+};
 
 function formatCreatedAt(value: string): string {
   if (!value) return "unknown time";
@@ -60,18 +63,23 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [history, setHistory] = useState<WorldSummary[]>([]);
-  const [worldState, setWorldState] = useState<{ worldId: string | null; x: number; y: number }>({
+  const [worldState, setWorldState] = useState<{
+    worldId: string | null;
+    nodeId: string | null;
+  }>({
     worldId: null,
-    x: 0,
-    y: 0,
+    nodeId: null,
   });
   const [cacheState, setCacheState] = useState("-");
+  const [targetState, setTargetState] = useState("-");
   const [activeNode, setActiveNode] = useState<NodePayload | null>(null);
+  const pointerStartRef = useRef<PointerStart | null>(null);
 
   function renderPanorama(payload: NodePayload) {
     setActiveNode(payload);
-    setWorldState({ worldId: payload.worldId, x: payload.x, y: payload.y });
+    setWorldState({ worldId: payload.worldId, nodeId: payload.nodeId });
     setCacheState(payload.cacheHit ? "hit" : "miss");
+    setTargetState(payload.target?.targetLabel ?? "-");
   }
 
   async function loadHistory() {
@@ -93,7 +101,7 @@ export default function App() {
     try {
       const data = await startWorldRequest(prompt);
       renderPanorama(data);
-      setStatus("World ready. Drag and move to explore.");
+      setStatus("World ready. Drag to look around, click a target to enter it.");
       await loadHistory();
     } catch (error) {
       setStatus(`Error: ${getErrorMessage(error)}`);
@@ -107,10 +115,10 @@ export default function App() {
     setBusy(true);
     setStatus("Opening cached world...");
     try {
-      const data = await getWorldNode(worldId, 0, 0);
+      const data = await getWorldNode(worldId);
       renderPanorama(data);
       if (worldPrompt) setPrompt(worldPrompt);
-      setStatus("World loaded. Use arrows to explore.");
+      setStatus("World loaded. Drag to look around, click a target to enter it.");
     } catch (error) {
       setStatus(`Error: ${getErrorMessage(error)}`);
     } finally {
@@ -118,23 +126,32 @@ export default function App() {
     }
   }
 
-  async function move(direction: Direction) {
-    if (!worldState.worldId) {
+  async function enterClickedTarget(pitch: number, yaw: number) {
+    if (!worldState.worldId || !worldState.nodeId || !activeNode) {
       setStatus("Start or open a world first.");
       return;
     }
 
     setBusy(true);
-    setStatus(`Moving ${direction}...`);
+    setStatus("Inspecting target and generating next view...");
     try {
-      const data = await moveWorld({
+      const data = await enterTarget({
         worldId: worldState.worldId,
-        x: worldState.x,
-        y: worldState.y,
-        direction,
+        parentNodeId: worldState.nodeId,
+        sourceImageUrl: activeNode.imageUrl,
+        pitch,
+        yaw,
+        onProgress: (progress) => {
+          setStatus(progress === "inspect" ? "Inspecting target..." : "Generating next view...");
+        },
       });
+      setStatus(data.cacheHit ? "Reopening cached target..." : "Generating next view...");
       renderPanorama(data);
-      setStatus(`Moved ${direction}. Drag to inspect this location.`);
+      setStatus(
+        data.target?.targetLabel
+          ? `Entered ${data.target.targetLabel}.`
+          : "Entered the clicked target."
+      );
       await loadHistory();
     } catch (error) {
       setStatus(`Error: ${getErrorMessage(error)}`);
@@ -144,7 +161,7 @@ export default function App() {
   }
 
   async function reloadCurrentNode() {
-    if (!worldState.worldId) {
+    if (!worldState.worldId || !worldState.nodeId) {
       setStatus("Start or open a world first.");
       return;
     }
@@ -152,7 +169,7 @@ export default function App() {
     setBusy(true);
     setStatus("Reloading current node...");
     try {
-      const data = await getWorldNode(worldState.worldId, worldState.x, worldState.y);
+      const data = await getWorldNode(worldState.worldId, worldState.nodeId);
       renderPanorama(data);
       setStatus("Reload complete.");
     } catch (error) {
@@ -198,7 +215,48 @@ export default function App() {
     };
   }, [activeNode]);
 
-  const moveDisabled = busy || !worldState.worldId;
+  function shouldIgnorePointerTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    return Boolean(
+      target.closest("button, a, textarea, input, select, .pnlm-controls, .pnlm-load-button")
+    );
+  }
+
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || busy || !worldState.worldId || shouldIgnorePointerTarget(event.target)) {
+      pointerStartRef.current = null;
+      return;
+    }
+    pointerStartRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      time: window.performance.now(),
+      pointerId: event.pointerId,
+    };
+  }
+
+  function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+    const pointerStart = pointerStartRef.current;
+    pointerStartRef.current = null;
+    if (!pointerStart || pointerStart.pointerId !== event.pointerId) return;
+    if (busy || !viewerRef.current || shouldIgnorePointerTarget(event.target)) return;
+
+    const dx = event.clientX - pointerStart.x;
+    const dy = event.clientY - pointerStart.y;
+    const distance = Math.hypot(dx, dy);
+    const elapsed = window.performance.now() - pointerStart.time;
+    if (distance > CLICK_MOVE_THRESHOLD_PX || elapsed > CLICK_TIME_THRESHOLD_MS) return;
+
+    const mouseEvent = new MouseEvent("mouseup", {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      screenX: event.screenX,
+      screenY: event.screenY,
+      bubbles: true,
+    });
+    const [pitch, yaw] = viewerRef.current.mouseEventToCoords(mouseEvent);
+    void enterClickedTarget(pitch, yaw);
+  }
 
   return (
     <div className="app-shell">
@@ -268,30 +326,23 @@ export default function App() {
         </aside>
 
         <main className="viewer-panel panel">
-          <div className="panorama-wrap">
+          <div
+            className={`panorama-wrap ${worldState.worldId && !busy ? "clickable" : ""}`}
+            onPointerDown={handlePointerDown}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={() => {
+              pointerStartRef.current = null;
+            }}
+          >
             <div id="panorama" className={!worldState.worldId ? "empty" : ""} />
             {!worldState.worldId && <div className="empty-message">Start or open a world.</div>}
-            <div className="dpad" aria-label="Movement controls">
-              {DIRECTIONS.map((direction) => (
-                <button
-                  key={direction.id}
-                  id={`move-${direction.id}`}
-                  title={direction.title}
-                  disabled={moveDisabled}
-                  onClick={() => move(direction.id)}
-                >
-                  {direction.label}
-                </button>
-              ))}
-            </div>
           </div>
 
           <div className="hud">
             <div>World: {worldState.worldId ?? "-"}</div>
-            <div>
-              Coord: ({worldState.x}, {worldState.y})
-            </div>
+            <div>Node: {worldState.nodeId ?? "-"}</div>
             <div>Cache: {cacheState}</div>
+            <div>Target: {targetState}</div>
           </div>
         </main>
       </div>

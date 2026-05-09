@@ -207,6 +207,10 @@ button:disabled {
   position: relative;
 }
 
+.panorama-wrap.clickable #panorama {
+  cursor: crosshair;
+}
+
 #panorama {
   width: 100%;
   height: 72vh;
@@ -227,54 +231,6 @@ button:disabled {
   place-items: center;
   color: #c9d2e0;
   pointer-events: none;
-}
-
-.dpad {
-  position: absolute;
-  left: 50%;
-  bottom: 20px;
-  transform: translateX(-50%);
-  z-index: 12;
-  display: grid;
-  grid-template-columns: repeat(3, 56px);
-  grid-template-rows: repeat(3, 56px);
-  gap: 8px;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(5, 8, 12, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  backdrop-filter: blur(8px);
-}
-
-.dpad button {
-  padding: 0;
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  font-size: 23px;
-  font-weight: 700;
-  color: #0d1322;
-  background: linear-gradient(180deg, #f4f8ff, #d6e4ff);
-}
-
-#move-north {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-#move-west {
-  grid-column: 1;
-  grid-row: 2;
-}
-
-#move-east {
-  grid-column: 3;
-  grid-row: 2;
-}
-
-#move-south {
-  grid-column: 2;
-  grid-row: 3;
 }
 
 .hud {

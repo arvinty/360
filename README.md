@@ -3,9 +3,10 @@
 This is a single Vite React app that:
 - takes a fictional world prompt,
 - opens a 360 panorama viewer,
-- supports Street View-style directional movement (north/south/east/west),
+- supports click-to-enter movement into any visual target in the current panorama,
 - generates panorama nodes with the OpenAI Image API,
-- stores world history and generated image data in browser local storage.
+- uses a vision model to interpret clicked windows, paintings, doors, objects, or surfaces,
+- stores world history and generated image data in IndexedDB.
 
 There is no backend. The app calls OpenAI directly from the browser, using the API key from `.env`.
 
@@ -36,4 +37,4 @@ There is no backend. The app calls OpenAI directly from the browser, using the A
 - This app loads Pannellum from a CDN in `index.html`.
 - Because this is a frontend-only app, the OpenAI API key is exposed to the browser while the local dev server is running.
 - Vite is configured to expose `OPENAI_API_KEY` from `.env` for this local-only workflow.
-- The app uses `gpt-image-1.5` with `1536x1024` landscape output.
+- Dragging the panorama only changes the view; a short click enters the clicked target.
