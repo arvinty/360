@@ -1,7 +1,7 @@
 const CHAT_URL = "/api/openai/chat";
 const IMAGE_URL = "/api/openai/image";
 
-const DEFAULT_CHAT_MODEL = "gpt-4.1-mini";
+const DEFAULT_CHAT_MODEL = "gpt-4o-mini";
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 
 export class OpenAIError extends Error {
