@@ -1,5 +1,9 @@
 import { chatJSON } from "./openai";
-import { SCENARIO_SYSTEM_PROMPT } from "./prompts";
+import {
+  SCENARIO_CORE_SYSTEM_PROMPT,
+  SCENARIO_ROOMS_SYSTEM_PROMPT,
+  SCENARIO_CLUES_SYSTEM_PROMPT,
+} from "./prompts";
 import type { NavigationClueSet, RoomCatalogEntry, Scenario } from "../game/types";
 
 export class ScenarioValidationError extends Error {
@@ -197,19 +201,56 @@ function validateScenario(s: unknown): asserts s is Scenario {
 
 const MAX_VALIDATION_RETRIES = 4;
 
+function buildContextForExpansion(core: Record<string, unknown>): string {
+  return `Core scenario context:
+mission_statement: ${core.mission_statement}
+start_room_descriptor: ${core.start_room_descriptor}
+destination_room_descriptor: ${core.destination_room_descriptor}
+crisis_summary: ${core.crisis_summary}
+art_style: ${core.art_style}
+gradient_axes: ${JSON.stringify(core.gradient_axes)}`;
+}
+
 export async function generateScenario(
   worldPrompt: string,
   onAttempt?: (attempt: number, max: number, lastError?: string) => void
 ): Promise<Scenario> {
-  let prompt = worldPrompt;
   let lastErr: ScenarioValidationError | null = null;
+
   for (let attempt = 0; attempt <= MAX_VALIDATION_RETRIES; attempt++) {
     onAttempt?.(attempt + 1, MAX_VALIDATION_RETRIES + 1, lastErr?.message);
-    const raw = await chatJSON<unknown>(SCENARIO_SYSTEM_PROMPT, prompt, {
-      temperature: 0.95,
-      maxTokens: 14000,
-    });
-    const normalized = normalizeScenarioShape(raw);
+
+    const corePrompt = lastErr
+      ? `${worldPrompt}\n\nPrevious attempt failed validation: ${lastErr.message}\nReturn a corrected JSON object that fixes this issue exactly.`
+      : worldPrompt;
+
+    const core = await chatJSON<Record<string, unknown>>(
+      SCENARIO_CORE_SYSTEM_PROMPT,
+      corePrompt,
+      { temperature: 0.95, maxTokens: 4000 }
+    );
+
+    const expansionContext = buildContextForExpansion(core);
+    const userPrompt = `World prompt: ${worldPrompt}\n\n${expansionContext}`;
+
+    const [roomsRes, cluesRes] = await Promise.all([
+      chatJSON<Record<string, unknown>>(SCENARIO_ROOMS_SYSTEM_PROMPT, userPrompt, {
+        temperature: 0.95,
+        maxTokens: 7000,
+      }),
+      chatJSON<Record<string, unknown>>(SCENARIO_CLUES_SYSTEM_PROMPT, userPrompt, {
+        temperature: 0.95,
+        maxTokens: 5000,
+      }),
+    ]);
+
+    const merged: Record<string, unknown> = {
+      ...core,
+      room_catalog: roomsRes.room_catalog,
+      navigation_clue_sets: cluesRes.navigation_clue_sets,
+    };
+
+    const normalized = normalizeScenarioShape(merged) as Record<string, unknown> & Scenario;
     try {
       validateScenario(normalized);
       normalized.descriptor_curve = [...normalized.descriptor_curve].sort((a, b) => a.p - b.p);
@@ -219,7 +260,6 @@ export async function generateScenario(
       if (!(err instanceof ScenarioValidationError)) throw err;
       lastErr = err;
       console.warn(`[scenario] attempt ${attempt + 1} failed validation: ${err.message}`);
-      prompt = `${worldPrompt}\n\nPrevious attempt failed validation: ${err.message}\nReturn a corrected JSON object that fixes this issue exactly.`;
     }
   }
   throw lastErr ?? new ScenarioValidationError("scenario validation failed");

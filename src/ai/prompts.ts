@@ -1,6 +1,6 @@
-export const SCENARIO_SYSTEM_PROMPT = `You design frozen-moment crisis scenarios for a panoramic exploration game. The player will read a written mission briefing instead of seeing the destination — so the briefing must make the goal room vividly imaginable from text alone.
+export const SCENARIO_CORE_SYSTEM_PROMPT = `You design frozen-moment crisis scenarios for a panoramic exploration game. The player will read a written mission briefing instead of seeing the destination — so the briefing must make the goal room vividly imaginable from text alone.
 
-Given the player's world prompt, output JSON with these fields:
+Given the player's world prompt, output JSON with these fields ONLY (no rooms, no clues — those are generated separately):
 
 mission_statement: 70-110 words, second person, present tense. Three beats:
   (1) Establish the crisis: what's about to happen, who/what is at stake, what scale of disaster. One or two sentences.
@@ -22,7 +22,15 @@ descriptor_curve: array of 5 objects {p, descriptor} at p = 0, 0.25, 0.5, 0.75, 
 
 art_style: 20-40 words. A precise visual style derived from the player's world prompt. Specify medium (photoreal 35mm film / oil painting / anime cel / watercolor / 3D render / etc.), mood lighting, palette tendencies, level of stylization. This style must be applied uniformly to every room generated for this scenario, so be specific and unambiguous. Do NOT contradict the player's world prompt — if they asked for a watercolor world, this is a watercolor world.
 
+Output valid JSON only. No code fences, no preamble, no commentary. Do not include room_catalog or navigation_clue_sets.`;
+
+export const SCENARIO_ROOMS_SYSTEM_PROMPT = `You design the room catalog for a frozen-moment crisis scenario. The core scenario (mission, descriptors, axes, art style) is provided. Output JSON with one field:
+
 room_catalog: array of EXACTLY 32 distinct named rooms, each {name, concept}. These are the unique rooms that fill the world. Index 0 is the starting room (must align with start_room_descriptor). Index 31 is the goal room (must align with destination_room_descriptor). Indices 1..30 are intermediate rooms — each architecturally and atmospherically DISTINCT from every other room in the catalog. No two rooms share the same dominant feature. Each name is 2-5 evocative words ("the salt observatory", "antechamber of folded mirrors"). Each concept is 12-25 words describing the one or two specific features that make THIS room unmistakable from the others (e.g., "a long bronze table set for nine, every chair toppled but one"). Concepts should fit inside the world's vocabulary and progress loosely from calm (low indices) toward catastrophe (high indices) so they harmonize with the gradient curve, but each is its own place.
+
+Output valid JSON only. No code fences, no preamble, no commentary.`;
+
+export const SCENARIO_CLUES_SYSTEM_PROMPT = `You design navigation clue sets for a frozen-moment crisis scenario. The core scenario is provided. Output JSON with one field:
 
 navigation_clue_sets: array of EXACTLY 32 ranked clue sets, each {class_name, correct_object, decoy_objects}. These are used as physical objects placed in front of the four archways so the player can infer which way leads toward the goal.
   Choose class_name from this list, or a more specific subtype if it clearly belongs to one of these classes: portraits, equations, furniture, chemical elements, books, tools, clocks, keys, maps, musical instruments, masks, statues, gemstones, plants, architectural models, weapons, machines, constellations, weather symbols, food dishes, medical instruments, laboratory glassware, relics, uniforms, flags, toys, chess pieces, tarot cards, circuit boards, fossils, coins, candles, vessels, fabrics, trophies, cameras, lenses, astrolabes, compasses, locks, seeds, shells, minerals, handwritten notes, blueprints, ritual objects, emergency equipment, scientific diagrams.
