@@ -146,30 +146,38 @@ export function useGameRun() {
       }
       setRun((p) => ({ ...p, roomsReady: 0 }));
 
-      // fully parallel — every job fires at once, individual failures are swallowed.
-      await Promise.all(
-        indexToCoord.map((coord, idx) =>
-          generateRoom({
+      // Bounded concurrency: gpt-image-2 caps at 20 images/min. Fan out at most
+      // CONCURRENCY at a time; individual failures are swallowed.
+      const CONCURRENCY = 5;
+      let cursor = 0;
+      const runOne = async (idx: number) => {
+        try {
+          const room = await generateRoom({
             seed,
-            coord,
+            coord: indexToCoord[idx],
             scenario,
             start,
             destination,
             catalogIndex: idx,
-          })
-            .then((room) => {
-              setRun((p) => ({
-                ...p,
-                prebuiltRooms: { ...p.prebuiltRooms, [idx]: room },
-                roomsReady: p.roomsReady + 1,
-              }));
-            })
-            .catch((err) => {
-              console.warn(`[room ${idx}] generation failed (will lazy-gen on visit):`, err);
-              setRun((p) => ({ ...p, roomsReady: p.roomsReady + 1 }));
-            })
-        )
-      );
+          });
+          setRun((p) => ({
+            ...p,
+            prebuiltRooms: { ...p.prebuiltRooms, [idx]: room },
+            roomsReady: p.roomsReady + 1,
+          }));
+        } catch (err) {
+          console.warn(`[room ${idx}] generation failed (will lazy-gen on visit):`, err);
+          setRun((p) => ({ ...p, roomsReady: p.roomsReady + 1 }));
+        }
+      };
+      const worker = async () => {
+        while (true) {
+          const idx = cursor++;
+          if (idx >= indexToCoord.length) return;
+          await runOne(idx);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, indexToCoord.length) }, worker));
     },
     []
   );
