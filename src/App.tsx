@@ -7,7 +7,7 @@ import { EndScreen } from "./components/EndScreen";
 import { DebugPanel } from "./components/DebugPanel";
 
 export default function App() {
-  const { run, submitPrompt, beginExploration, step, warpTo, regenerateRoom, reset, replaySameWorld, warningLevel } = useGameRun();
+  const { run, submitPrompt, beginExploration, step, warpTo, regenerateRoom, reset, replaySameWorld, loadCached, warningLevel } = useGameRun();
 
   let screen: JSX.Element | null = null;
 
@@ -15,6 +15,7 @@ export default function App() {
     screen = (
       <PromptEntry
         onSubmit={submitPrompt}
+        onLoadCached={loadCached}
         loading={run.status === "generating_scenario"}
         error={run.error}
       />

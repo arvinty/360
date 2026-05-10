@@ -10,6 +10,7 @@ import {
   step as stepCoord,
 } from "../game/coordinates";
 import { clearRun, newSeed, saveRoom, saveRun } from "../game/storage";
+import { loadCachedRun, saveCachedRun } from "../game/cacheDB";
 import type { Coord, Direction, GameRun, RoomData, Scenario } from "../game/types";
 
 const initialRun: GameRun = {
@@ -178,9 +179,44 @@ export function useGameRun() {
         }
       };
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, indexToCoord.length) }, worker));
+
+      // Persist this fully-prepared run to IDB cache so it can be replayed instantly.
+      const finalRun = runRef.current;
+      void saveCachedRun(
+        {
+          seed,
+          worldPrompt: finalRun.worldPrompt,
+          startCoord: start,
+          destinationCoord: destination,
+          scenario,
+          coordToCatalogIndex: coordMap,
+          catalogSize: scenario.room_catalog.length,
+        },
+        finalRun.prebuiltRooms
+      );
     },
     []
   );
+
+  const loadCached = useCallback(async (seed: string) => {
+    const cached = await loadCachedRun(seed);
+    if (!cached) return false;
+    const { meta, rooms } = cached;
+    setRun({
+      ...initialRun,
+      seed: meta.seed,
+      worldPrompt: meta.worldPrompt,
+      scenario: meta.scenario,
+      startCoord: meta.startCoord,
+      destinationCoord: meta.destinationCoord,
+      currentCoord: meta.startCoord,
+      coordToCatalogIndex: meta.coordToCatalogIndex,
+      prebuiltRooms: rooms,
+      roomsReady: Object.keys(rooms).length,
+      status: "briefing",
+    });
+    return true;
+  }, []);
 
   const beginExploration = useCallback(async () => {
     const r = runRef.current;
@@ -349,6 +385,7 @@ export function useGameRun() {
     regenerateRoom,
     reset,
     replaySameWorld,
+    loadCached,
     stepsRemaining: run.scenario ? run.scenario.step_budget - run.stepsTaken : 0,
     distanceToDestination: manhattan(run.currentCoord, run.destinationCoord),
     warningLevel: computeWarning(run.wrongStreak, run.neutralStreak),
