@@ -1,17 +1,8 @@
-const CHAT_URL = "https://api.openai.com/v1/chat/completions";
-const IMAGE_URL = "https://api.openai.com/v1/images/generations";
-const IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
+const CHAT_URL = "/api/openai/chat";
+const IMAGE_URL = "/api/openai/image";
 
 const DEFAULT_CHAT_MODEL = "gpt-4.1-mini";
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
-
-function getKey(): string {
-  const key = import.meta.env.VITE_OPENAI_API_KEY || import.meta.env.OPENAI_API_KEY;
-  if (!key) {
-    throw new Error("Missing VITE_OPENAI_API_KEY in .env");
-  }
-  return key;
-}
 
 export class OpenAIError extends Error {
   status: number;
@@ -49,7 +40,6 @@ export async function chatJSON<T>(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${getKey()}`,
       },
       body: JSON.stringify({
         model: opts?.model ?? DEFAULT_CHAT_MODEL,
@@ -80,15 +70,6 @@ export async function chatJSON<T>(
   });
 }
 
-function dataUrlToBlob(dataUrl: string): Blob {
-  const [meta, b64] = dataUrl.split(",");
-  const mime = /data:(.*?);base64/.exec(meta)?.[1] ?? "image/png";
-  const bin = atob(b64);
-  const buf = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-  return new Blob([buf], { type: mime });
-}
-
 export async function generateImage(
   prompt: string,
   opts?: { referenceImage?: string; model?: string; size?: string }
@@ -97,29 +78,18 @@ export async function generateImage(
   const size = opts?.size ?? "1536x1024";
 
   return withRetry(async () => {
-    let r: Response;
-    if (opts?.referenceImage) {
-      const fd = new FormData();
-      fd.append("model", model);
-      fd.append("prompt", prompt);
-      fd.append("size", size);
-      fd.append("n", "1");
-      fd.append("image", dataUrlToBlob(opts.referenceImage), "reference.png");
-      r = await fetch(IMAGE_EDIT_URL, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${getKey()}` },
-        body: fd,
-      });
-    } else {
-      r = await fetch(IMAGE_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${getKey()}`,
-        },
-        body: JSON.stringify({ model, prompt, size, n: 1 }),
-      });
-    }
+    const r = await fetch(IMAGE_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        prompt,
+        size,
+        referenceImage: opts?.referenceImage,
+      }),
+    });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       throw new OpenAIError(r.status, data?.error?.message || `HTTP ${r.status}`);

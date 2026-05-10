@@ -1,5 +1,7 @@
 # A Flicker In Time
 
+**Play it live: https://360-cd1.vercel.app**
+
 A single-player browser game where you are dropped into a 360° panoramic world frozen a half-second before a disaster, and must walk room-to-room until you find the one place the catastrophe can still be averted — before your step budget runs out.
 
 The whole world is generated from a single world prompt: an OpenAI chat call composes a 32-room scenario (mission briefing, gradient axes, descriptor curve, art style, room catalog, navigation clue sets), then OpenAI's image API renders all 32 equirectangular panoramas in parallel.
