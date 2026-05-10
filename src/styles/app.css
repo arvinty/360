@@ -1065,70 +1065,83 @@ input, textarea { font: inherit; }
   display: block;
   font-family: var(--mono, ui-monospace, monospace);
 }
-.debug-edge-seq {
+.debug-cell-empty {
   stroke: rgba(255,255,255,0.08);
   stroke-width: 1;
-  stroke-dasharray: 3 4;
+  stroke-dasharray: 3 3;
 }
-.debug-edge-adj {
-  stroke: rgba(196, 255, 61, 0.55);
-  stroke-width: 2;
+.debug-door {
+  fill: rgba(196, 255, 61, 0.85);
+  stroke: rgba(0,0,0,0.35);
+  stroke-width: 0.5;
 }
-.debug-node-circle {
-  fill: rgba(255,255,255,0.06);
-  stroke: rgba(255,255,255,0.35);
+.debug-cell {
+  fill: rgba(255,255,255,0.05);
+  stroke: rgba(255,255,255,0.4);
   stroke-width: 1.5;
   transition: fill 140ms, stroke 140ms;
 }
-.debug-node-circle.pending {
-  stroke-dasharray: 2 3;
-  opacity: 0.5;
+.debug-cell.pending {
+  stroke-dasharray: 4 3;
+  opacity: 0.6;
 }
-.debug-node-circle.ready {
-  fill: rgba(255,255,255,0.12);
+.debug-cell.ready {
+  fill: rgba(255,255,255,0.1);
 }
-.debug-node-circle.visited {
-  fill: rgba(196,255,61,0.18);
-  stroke: rgba(196,255,61,0.7);
+.debug-cell.visited {
+  fill: rgba(196,255,61,0.16);
+  stroke: rgba(196,255,61,0.65);
 }
-.debug-node-circle.start {
-  fill: rgba(74, 214, 255, 0.25);
+.debug-cell.start {
+  fill: rgba(74, 214, 255, 0.22);
   stroke: #4ad6ff;
   stroke-width: 2.5;
 }
-.debug-node-circle.goal {
-  fill: rgba(255, 184, 74, 0.28);
+.debug-cell.goal {
+  fill: rgba(255, 184, 74, 0.24);
   stroke: #ffb84a;
   stroke-width: 2.5;
 }
-.debug-node-circle.current {
-  fill: #c4ff3d;
+.debug-cell.current {
+  fill: rgba(196,255,61,0.55);
   stroke: #c4ff3d;
   stroke-width: 2.5;
 }
-.debug-halo {
-  fill: none;
-  stroke-width: 1;
-  opacity: 0.45;
-}
-.debug-halo.start { stroke: #4ad6ff; }
-.debug-halo.goal { stroke: #ffb84a; }
-.debug-node-idx {
-  fill: rgba(244,243,238,0.85);
-  font-size: 10px;
-  text-anchor: middle;
-  pointer-events: none;
-  font-weight: 600;
-}
-.debug-node-circle.current + .debug-node-idx { fill: #0a0a0a; }
-.debug-node-label {
-  fill: rgba(244,243,238,0.7);
+.debug-cell-idx {
+  fill: rgba(244,243,238,0.55);
   font-size: 9px;
-  letter-spacing: 0.04em;
+  font-weight: 600;
+  pointer-events: none;
+  text-anchor: start;
+}
+.debug-cell-coord {
+  fill: rgba(244,243,238,0.4);
+  font-size: 9px;
+  pointer-events: none;
+  text-anchor: end;
+}
+.debug-cell-name {
+  fill: rgba(244,243,238,0.92);
+  font-size: 11px;
+  letter-spacing: 0.02em;
   text-anchor: middle;
   pointer-events: none;
   text-transform: lowercase;
+  font-weight: 500;
 }
-.debug-node-g:hover .debug-node-circle {
+.debug-cell-tag {
+  fill: rgba(244,243,238,0.65);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-anchor: middle;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+.debug-cell.current ~ .debug-cell-name,
+.debug-cell-g:has(.debug-cell.current) .debug-cell-name { fill: #0a0a0a; }
+.debug-cell-g:has(.debug-cell.current) .debug-cell-idx,
+.debug-cell-g:has(.debug-cell.current) .debug-cell-coord,
+.debug-cell-g:has(.debug-cell.current) .debug-cell-tag { fill: rgba(10,10,10,0.7); }
+.debug-cell-g:hover .debug-cell {
   stroke-width: 3;
 }
