@@ -1,6 +1,6 @@
 const STORAGE_KEY = "grid-360-worlds";
 const OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations";
-const OPENAI_IMAGE_MODEL = "gpt-image-2";
+const OPENAI_IMAGE_MODEL = "gpt-image-1";
 const IMAGE_DB_NAME = "grid-360-images";
 const IMAGE_DB_STORE = "images";
 const IMAGE_DB_VERSION = 1;
